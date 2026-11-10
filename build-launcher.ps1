@@ -1,6 +1,5 @@
 param(
-    [ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version,
-    [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}$')][string]$Repository
+    [ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version
 )
 
 $ErrorActionPreference = 'Stop'
@@ -13,7 +12,6 @@ $DotNetArguments = @(
     '-p:EnableCompressionInSingleFile=true', '-p:DebugType=None', '-o', $Publish
 )
 if ($Version) { $DotNetArguments += "-p:Version=$Version" }
-if ($Repository) { $DotNetArguments += "-p:UpdateRepository=$Repository" }
 & dotnet @DotNetArguments
 if ($LASTEXITCODE -ne 0) { throw 'Launcher build failed.' }
 

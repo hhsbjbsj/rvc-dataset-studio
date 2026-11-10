@@ -6,9 +6,9 @@
 
 需要 Windows 10/11、Python 3.11 或 3.12（含 `py` 启动器）、Node.js 22.12 或更高版本，以及 PATH 中的 `ffmpeg` 和 `ffprobe`。使用 `py -0p`、`node --version`、`ffmpeg -version` 和 `ffprobe -version` 检查。
 
-到 [GitHub 发布页](https://github.com/hhsbjbsj/rvc-dataset-studio/releases/latest) 下载 Windows x64 ZIP，解压到剩余空间充足的磁盘，从解压目录打开 `RvcLauncher.exe`。首次打开可点击「初始化环境」，然后点击「启动工作台」。如果关掉了浏览器标签页，回到启动器点「打开工作台」即可。启动器会显示实际地址，默认使用 5173 端口，遇到占用时会自动选择空闲端口。顶部可以换图或恢复默认壁纸。「背景适配」支持铺满裁剪、完整显示和拉伸填满，裁剪时可在预览里拖动图片。左侧齿轮可配置 GitHub 更新仓库和启动器语言。关闭启动器时，可确认停止它启动的服务。
+到 [GitHub 发布页](https://github.com/hhsbjbsj/rvc-dataset-studio/releases/latest) 下载 Windows x64 ZIP，解压到剩余空间充足的磁盘，从解压目录打开 `RvcLauncher.exe`。首次打开可点击「初始化环境」，然后点击「启动工作台」。如果关掉了浏览器标签页，回到启动器点「打开工作台」即可。启动器会显示实际地址，默认使用 5173 端口，遇到占用时会自动选择空闲端口。顶部可以换图或恢复默认壁纸。「背景适配」支持铺满裁剪、完整显示和拉伸填满，裁剪时可在预览里拖动图片。左侧齿轮可切换启动器语言和自动检查更新。点击「检查更新」可阅读新版说明，再点「下载并重启更新」在应用内安装。更新源固定为本项目的 GitHub 仓库。安装前请保存编辑，等待处理任务结束。关闭启动器时，可确认停止它启动的服务。
 
-从源码构建启动器需要 .NET 10 SDK。在项目根目录运行 `build-launcher.ps1` 会生成 Windows x64 单文件 EXE。发布时可以传入 `-Version 0.1.0 -Repository hhsbjbsj/rvc-dataset-studio`，把版本和更新源写入 EXE。GitHub Release 标签用 `v0.1.0` 这样的正式版本号。启用自动检查后，启动器在到期时查询正式 Release，发现新版会提供发布页入口。
+从源码构建启动器需要 .NET 10 SDK。在项目根目录运行 `build-launcher.ps1` 会生成 Windows x64 单文件 EXE。版本号由启动器项目文件管理。准备发布时，在干净的 Git 提交上运行 `package-release.ps1`，会生成含 EXE、源码和已编译网页的 Windows ZIP 及 SHA-256 校验文件。把 ZIP 上传到 GitHub 正式 Release，并填写本次更新说明，启动器就能检查和安装。更新会备份替换的程序文件，安装失败时回滚。项目、音频、导出和设置保存在独立数据目录。新版增加 Python 依赖时，安装完成后会提示初始化环境。
 
 也可以在项目根目录打开 PowerShell，依次运行以下开发命令。
 

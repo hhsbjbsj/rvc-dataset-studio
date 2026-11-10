@@ -5,14 +5,11 @@
     <UseWPF>true</UseWPF>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <Version>0.1.0</Version>
+    <Version>0.1.1</Version>
     <Product>RVC Dataset Studio</Product>
     <ApplicationIcon>Assets/RvcLauncher.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>
     <Resource Include="Assets/RvcLauncher.ico" />
-  </ItemGroup>
-  <ItemGroup Condition="'$(UpdateRepository)' != ''">
-    <AssemblyMetadata Include="UpdateRepository" Value="$(UpdateRepository)" />
   </ItemGroup>
 </Project>

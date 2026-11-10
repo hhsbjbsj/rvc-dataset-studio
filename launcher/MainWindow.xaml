@@ -187,7 +187,7 @@
                                              Foreground="#ACBFFF" Background="#303A58" />
                             </StackPanel>
                             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                                <Button x:Name="ReleaseButton" Style="{StaticResource Action}" Click="OpenRelease" Visibility="Collapsed" Margin="0,0,8,0" />
+                                <Button x:Name="ReleaseButton" Style="{StaticResource Action}" Click="ShowUpdate" Visibility="Collapsed" Margin="0,0,8,0" />
                                 <Button x:Name="UpdateButton" Style="{StaticResource Action}" Click="CheckUpdates" Margin="0,0,10,0" />
                                 <Button x:Name="LaunchButton" Style="{StaticResource Action}" Click="Launch"
                                         MinWidth="166" Height="51" FontSize="15" Background="#B5C8FF" Foreground="#10182C" />
@@ -205,10 +205,6 @@
                             <Button x:Name="DismissSettingsButton" Style="{StaticResource IconButton}" Content="×" DockPanel.Dock="Right" Click="DismissSettings" />
                             <TextBlock x:Name="SettingsTitle" FontSize="23" FontWeight="Bold" VerticalAlignment="Center" />
                         </DockPanel>
-                        <TextBlock x:Name="RepositoryLabel" Margin="0,17,0,6" FontWeight="SemiBold" />
-                        <TextBox x:Name="RepositoryInput" Background="#10172A" Foreground="#EEF2FF" BorderBrush="#6376A5"
-                                 Padding="8,7" FontSize="14" MaxLength="200" />
-                        <TextBlock x:Name="RepositoryHelp" Foreground="#B3C1E1" TextWrapping="Wrap" Margin="0,5,0,0" />
                         <CheckBox x:Name="AutoUpdateInput" Margin="0,13,0,13" Foreground="#E9EEFF" />
                         <TextBlock x:Name="LanguageLabel" Margin="0,0,0,6" FontWeight="SemiBold" />
                         <ComboBox x:Name="LanguageInput" Width="166" HorizontalAlignment="Left" Padding="6,4">
@@ -255,6 +251,29 @@
                                     Background="#B5C8FF" Foreground="#10182C" />
                         </WrapPanel>
                     </StackPanel>
+                </Border>
+            </Grid>
+            <Grid x:Name="UpdateOverlay" Grid.ColumnSpan="2" Background="#D00B1122" Visibility="Collapsed">
+                <Border Background="#192138" BorderBrush="#6174A6" BorderThickness="1" CornerRadius="15"
+                        Width="610" MaxHeight="520" Padding="24" HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" />
+                            <RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <TextBlock x:Name="UpdateTitle" FontSize="23" FontWeight="Bold" />
+                        <TextBlock x:Name="UpdateVersion" Grid.Row="1" Margin="0,8,0,14" Foreground="#BAC7E5" />
+                        <TextBox x:Name="ReleaseNotes" Grid.Row="2" MinHeight="120" MaxHeight="260" Padding="12"
+                                 IsReadOnly="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
+                                 Background="#10172A" Foreground="#EEF2FF" BorderBrush="#6376A5" />
+                        <TextBlock x:Name="UpdateHint" Grid.Row="3" TextWrapping="Wrap" Margin="0,12,0,8" Foreground="#BAC7E5" />
+                        <ProgressBar x:Name="DownloadProgress" Grid.Row="4" Height="5" Maximum="100" Visibility="Collapsed" />
+                        <StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,15,0,0">
+                            <Button x:Name="CancelUpdateButton" Style="{StaticResource Action}" Click="DismissUpdate" Margin="0,0,8,0" />
+                            <Button x:Name="InstallUpdateButton" Style="{StaticResource Action}" Click="InstallUpdate"
+                                    Background="#B5C8FF" Foreground="#10182C" />
+                        </StackPanel>
+                    </Grid>
                 </Border>
             </Grid>
         </Grid>

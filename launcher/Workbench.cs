@@ -21,7 +21,8 @@ internal sealed class Workbench(string root, string dataDirectory)
 
     public bool HasProject => File.Exists(Path.Combine(backend, "main.py"));
     public bool NeedsSetup => !File.Exists(Path.Combine(backend, "venv", "Scripts", "python.exe"))
-        || !File.Exists(Path.Combine(root, "frontend", "dist", "index.html"));
+        || !File.Exists(Path.Combine(root, "frontend", "dist", "index.html"))
+        || File.Exists(Path.Combine(dataDirectory, "needs-setup"));
     public bool OwnsService => service is { HasExited: false };
 
     public static string FindRoot()
@@ -122,7 +123,9 @@ internal sealed class Workbench(string root, string dataDirectory)
             info.ArgumentList.Add(argument);
         using var setup = StartLogged(info, "setup.log");
         await setup.WaitForExitAsync(cancellationToken);
-        return setup.ExitCode == 0 && !NeedsSetup;
+        if (setup.ExitCode != 0) return false;
+        File.Delete(Path.Combine(dataDirectory, "needs-setup"));
+        return !NeedsSetup;
     }
 
     public void StopOwned()

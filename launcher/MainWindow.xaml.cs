@@ -27,10 +27,8 @@ public partial class MainWindow : Window
     private Uri? page;
     private bool busy;
     private bool probing;
-    private bool checkingUpdate;
     private string serviceMessage = "checkingService";
     private object[] serviceArguments = [];
-    private string? updateError;
 
     public MainWindow()
     {
@@ -42,8 +40,6 @@ public partial class MainWindow : Window
         workbench = new Workbench(root, dataDirectory);
         settings = LauncherSettings.Load(settingsPath);
         settings.Wallpaper = NormalizePlacement(settings.Wallpaper);
-        if (GitHubReleases.TryRepository(settings.Repository ?? "", out string repository)) settings.Repository = repository;
-        else settings.Repository = "";
         LoadWallpaper();
         WallpaperHost.SizeChanged += (_, _) => RefreshWallpaper();
         RenderLabels();
@@ -52,7 +48,8 @@ public partial class MainWindow : Window
             serviceTimer.Start();
             updateTimer.Start();
             await ProbeAsync();
-            await CheckIfDueAsync();
+            ReadUpdateResult();
+            if (settings.AutoCheck) await CheckAsync(false);
         };
         serviceTimer.Tick += async (_, _) => await ProbeAsync();
         updateTimer.Tick += async (_, _) => await CheckIfDueAsync();
@@ -72,16 +69,13 @@ public partial class MainWindow : Window
         SetAccessibleLabel(CloseButton, T("close"));
         SetAccessibleLabel(DismissSettingsButton, T("close"));
         SettingsTitle.Text = T("settings");
-        RepositoryLabel.Text = T("repo");
-        AutomationProperties.SetName(RepositoryInput, T("repo"));
-        RepositoryHelp.Text = T("repoHelp");
         AutoUpdateInput.Content = T("autoCheck");
         LanguageLabel.Text = T("language");
         AutomationProperties.SetName(LanguageInput, T("language"));
         LogButton.Content = T("logs");
         SaveSettingsButton.Content = T("save");
         UpdateButton.Content = T("checkUpdates");
-        ReleaseButton.Content = T("openRelease");
+        ReleaseButton.Content = T("viewUpdate");
         RenderService();
         RenderUpdate();
     }
@@ -180,112 +174,26 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task CheckIfDueAsync()
-    {
-        if (settings.AutoCheck && settings.Repository.Length != 0 && DateTimeOffset.UtcNow - settings.LastCheck >= UpdateInterval)
-            await CheckAsync();
-    }
-
-    private async void CheckUpdates(object sender, RoutedEventArgs e)
-    {
-        if (settings.Repository.Length == 0)
-        {
-            ShowSettings();
-            return;
-        }
-        await CheckAsync();
-    }
-
-    private async Task CheckAsync()
-    {
-        if (checkingUpdate || shutdown.IsCancellationRequested) return;
-        string repository = settings.Repository;
-        checkingUpdate = true;
-        updateError = null;
-        RenderUpdate();
-        try
-        {
-            string? tag = await GitHubReleases.LatestTagAsync(repository, shutdown.Token);
-            if (repository == settings.Repository) settings.LatestTag = tag;
-        }
-        catch (Exception exception) when (exception is HttpRequestException or OperationCanceledException or JsonException
-            or KeyNotFoundException or InvalidOperationException)
-        {
-            if (repository == settings.Repository) updateError = "updateFailed";
-        }
-        finally
-        {
-            checkingUpdate = false;
-            if (!shutdown.IsCancellationRequested)
-            {
-                if (repository == settings.Repository)
-                {
-                    settings.LastCheck = DateTimeOffset.UtcNow;
-                    if (!TrySave(settings)) updateError ??= "settingsFailed";
-                }
-                RenderUpdate();
-            }
-        }
-    }
-
-    private void RenderUpdate()
-    {
-        UpdateButton.IsEnabled = !checkingUpdate;
-        ReleaseButton.Visibility = Visibility.Collapsed;
-        if (checkingUpdate) UpdateStatus.Text = T("updateChecking");
-        else if (updateError is not null) UpdateStatus.Text = T(updateError);
-        else if (settings.Repository.Length == 0) UpdateStatus.Text = T("updateSource", VersionLabel);
-        else if (settings.LastCheck == default) UpdateStatus.Text = T("updateConfigured", VersionLabel);
-        else if (settings.LatestTag is not { } tag) UpdateStatus.Text = T("updateNone");
-        else
-        {
-            Version? latest = GitHubReleases.TagVersion(tag);
-            if (latest is null || latest > GitHubReleases.TagVersion(VersionLabel))
-            {
-                ReleaseButton.Visibility = Visibility.Visible;
-                UpdateStatus.Text = latest is null ? T("updateUnrecognized", tag) : T("updateNew", tag, VersionLabel);
-            }
-            else UpdateStatus.Text = T("updateCurrent", VersionLabel);
-        }
-    }
-
-    private void OpenRelease(object sender, RoutedEventArgs e)
-    {
-        if (settings.LatestTag is not { } tag) return;
-        try { Open(GitHubReleases.ReleaseUrl(settings.Repository, tag).AbsoluteUri); }
-        catch (Win32Exception) { ShowMessage("releaseFailed"); }
-    }
-
     private void OpenSettings(object sender, RoutedEventArgs e) => ShowSettings();
 
     private void ShowSettings()
     {
-        RepositoryInput.Text = settings.Repository;
         AutoUpdateInput.IsChecked = settings.AutoCheck;
         LanguageInput.SelectedItem = LanguageInput.Items.OfType<ComboBoxItem>()
             .FirstOrDefault(item => Equals(item.Tag, settings.Language)) ?? LanguageInput.Items[0];
         SettingsError.Visibility = Visibility.Collapsed;
         SettingsOverlay.Visibility = Visibility.Visible;
-        RepositoryInput.Focus();
+        LanguageInput.Focus();
     }
 
     private async void SaveSettings(object sender, RoutedEventArgs e)
     {
-        if (!GitHubReleases.TryRepository(RepositoryInput.Text, out string repository))
-        {
-            SettingsError.Text = T("invalidRepository");
-            SettingsError.Visibility = Visibility.Visible;
-            RepositoryInput.Focus();
-            return;
-        }
-        bool sameRepository = string.Equals(repository, settings.Repository, StringComparison.OrdinalIgnoreCase);
         var edited = new LauncherSettings
         {
-            Repository = repository,
             AutoCheck = AutoUpdateInput.IsChecked == true,
             Language = (LanguageInput.SelectedItem as ComboBoxItem)?.Tag as string ?? "zh",
-            LastCheck = sameRepository ? settings.LastCheck : default,
-            LatestTag = sameRepository ? settings.LatestTag : null,
+            LastCheck = settings.LastCheck,
+            LatestTag = settings.LatestTag,
             Wallpaper = settings.Wallpaper,
         };
         if (!TrySave(edited))
@@ -336,12 +244,12 @@ public partial class MainWindow : Window
 
     protected override void OnClosing(CancelEventArgs e)
     {
-        if (busy)
+        if (busy && !applyingUpdate)
         {
             e.Cancel = true;
             ShowMessage("closeBusy");
         }
-        else if (workbench.OwnsService)
+        else if (workbench.OwnsService && !applyingUpdate)
         {
             e.Cancel = MessageBox.Show(this, T("closeRunning"), Title, MessageBoxButton.YesNo,
                 MessageBoxImage.Question, MessageBoxResult.No) != MessageBoxResult.Yes;

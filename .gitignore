@@ -58,3 +58,5 @@ output/
 /RvcLauncher.exe
 /launcher/bin/
 /launcher/obj/
+/launcher-tests/bin/
+/launcher-tests/obj/

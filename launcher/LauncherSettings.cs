@@ -1,6 +1,5 @@
 using System.Globalization;
 using System.IO;
-using System.Reflection;
 using System.Text.Json;
 
 namespace RvcLauncher;
@@ -14,9 +13,6 @@ internal sealed class LauncherSettings
         _ => "zh",
     };
 
-    public string Repository { get; set; } = typeof(LauncherSettings).Assembly
-        .GetCustomAttributes<AssemblyMetadataAttribute>()
-        .FirstOrDefault(attribute => attribute.Key == "UpdateRepository")?.Value ?? "";
     public bool AutoCheck { get; set; } = true;
     public DateTimeOffset LastCheck { get; set; }
     public string? LatestTag { get; set; }
