@@ -121,13 +121,29 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
   }
   const ranges = drafts.map(draft => ({ start: Number(draft.start), end: Number(draft.end) }))
   const hasDuplicates = new Set(ranges.map(range => range.start + ':' + range.end)).size !== drafts.length
+  const canSave = !busy && drafts.length > 0 && !hasDuplicates && !drafts.some(rangeError)
+
+  function saveAllRanges() {
+    if (!canSave) return
+    onSave(ranges, () => {
+      if (preview.current) stopPreview()
+      setDrafts([])
+      setActiveId(undefined)
+    })
+  }
 
   function updateDraft(field: 'start' | 'end', value: string) {
     setDrafts(previous => previous.map(draft => draft.id === active?.id ? { ...draft, [field]: value } : draft))
   }
 
   function handleEditorKeys(event: KeyboardEvent<HTMLDivElement>) {
-    if (!active || busy || event.altKey || event.ctrlKey || event.metaKey || event.nativeEvent.isComposing) return
+    if (event.nativeEvent.isComposing) return
+    if (event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey && event.key.toLowerCase() === 's') {
+      event.preventDefault()
+      if (!event.repeat) saveAllRanges()
+      return
+    }
+    if (!active || busy || event.altKey || event.ctrlKey || event.metaKey) return
     const target = event.target
     if (!(target instanceof HTMLElement) || target.closest('select, textarea, audio, [contenteditable="true"]')) return
 
@@ -317,19 +333,14 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
           setDrafts(previous => [...previous, { id, start, end: '' }])
           setActiveId(id)
         }}>手动添加选区</button>
-        <button className="btn btn-primary btn-sm"
-          disabled={busy || !drafts.length || hasDuplicates || drafts.some(rangeError)}
-          onClick={() => onSave(ranges, () => {
-            if (preview.current) stopPreview()
-            setDrafts([])
-            setActiveId(undefined)
-          })}>
+        <button className="btn btn-primary btn-sm" disabled={!canSave}
+          aria-keyshortcuts="Control+S" onClick={saveAllRanges}>
           保存全部选区{drafts.length > 0 && '（' + drafts.length + ' 段）'}
         </button>
       </div>
       {hasDuplicates && <p className="text-xs text-lo">有重复的选区，请调整或移除后再保存。</p>}
       {drafts.length >= MAX_RANGES && <p className="text-xs text-lo">已达到单批 50 段的上限。</p>}
-      <p className="text-xs text-lo">选区确认后可一起保存，每段生成一个原速 WAV。</p>
+      <p className="text-xs text-lo">确认后可按 Ctrl+S 保存全部选区，每段生成一个独立的原速 WAV。</p>
       {playbackError && <p role="alert" className="text-sm text-mid">{playbackError}</p>}
     </div>
   )
