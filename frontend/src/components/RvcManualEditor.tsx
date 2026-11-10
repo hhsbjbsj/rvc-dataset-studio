@@ -44,6 +44,7 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
   const waveform = useRef<HTMLDivElement>(null)
   const preview = useRef<RangePreview | null>(null)
   const removedDrafts = useRef<RemovedDraft[]>([])
+  const restoredDraftIds = useRef<string[]>([])
   const active = drafts.find(draft => draft.id === activeId) ?? drafts[0]
   const waveRanges = useMemo(() => drafts.flatMap((draft, index) => {
     const start = Number(draft.start)
@@ -131,6 +132,7 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
     onSave(ranges, () => {
       if (preview.current) stopPreview()
       removedDrafts.current = []
+      restoredDraftIds.current = []
       setDrafts([])
       setActiveId(undefined)
     })
@@ -140,11 +142,12 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
     setDrafts(previous => previous.map(draft => draft.id === active?.id ? { ...draft, [field]: value } : draft))
   }
 
-  function removeDraft(id: string) {
+  function removeDraft(id: string, redo = false) {
     const index = drafts.findIndex(draft => draft.id === id)
     if (index < 0) return
+    if (!redo) restoredDraftIds.current = []
     removedDrafts.current.push({ draft: drafts[index], index })
-    if (id === active?.id) {
+    if (redo || id === active?.id) {
       const waveIndex = waveRanges.findIndex(range => range.id === id)
       const neighbor = waveRanges[waveIndex + 1] ?? waveRanges[waveIndex - 1]
       setActiveId(neighbor?.id)
@@ -159,6 +162,7 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
     const removed = removedDrafts.current.pop()
     if (!removed) return
     const { draft, index } = removed
+    restoredDraftIds.current.push(draft.id)
     setDrafts(previous => [...previous.slice(0, index), draft, ...previous.slice(index)])
     setActiveId(draft.id)
     waveform.current?.focus({ preventScroll: true })
@@ -169,14 +173,21 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
     const target = event.target
     if (!(target instanceof HTMLElement)) return
     const textEditor = target.closest('input, textarea, [contenteditable]:not([contenteditable="false"])')
-    if (event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey) {
+    if (event.ctrlKey && !event.altKey && !event.metaKey) {
       const key = event.key.toLowerCase()
-      if (key === 's') {
+      const redoRequested = event.shiftKey ? key === 'z' : key === 'y'
+      if (key === 's' && !event.shiftKey) {
         event.preventDefault()
         if (!event.repeat) saveAllRanges()
-      } else if (key === 'z' && !textEditor && removedDrafts.current.length) {
+      } else if (key === 'z' && !event.shiftKey && !textEditor && removedDrafts.current.length) {
         event.preventDefault()
         if (!busy && !event.repeat) restoreDraft()
+      } else if (redoRequested && !textEditor && restoredDraftIds.current.length) {
+        event.preventDefault()
+        if (!busy && !event.repeat) {
+          const id = restoredDraftIds.current.pop()
+          if (id) removeDraft(id, true)
+        }
       }
       return
     }
@@ -384,7 +395,7 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
       </div>
       {hasDuplicates && <p className="text-xs text-lo">有重复的选区，请调整或移除后再保存。</p>}
       {drafts.length >= MAX_RANGES && <p className="text-xs text-lo">已达到单批 50 段的上限。</p>}
-      <p className="text-xs text-lo">Delete 或小键盘 Del 移除当前选区。Ctrl+Z 撤销移除。Ctrl+S 保存剩余选区，每段生成一个独立的原速 WAV。</p>
+      <p className="text-xs text-lo">Delete 或小键盘 Del 移除当前选区。Ctrl+Z 撤销移除，Ctrl+Y 重做移除。Ctrl+S 保存剩余选区，每段生成一个独立的原速 WAV。</p>
       {playbackError && <p role="alert" className="text-sm text-mid">{playbackError}</p>}
     </div>
   )

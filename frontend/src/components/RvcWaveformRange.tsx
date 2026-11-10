@@ -164,7 +164,7 @@ export function RvcWaveformRange({ path, player, container, duration, offset, ra
       </div>
       <div className={'rvc-waveform min-h-24 rounded-md border border-white/10 bg-black/5 px-2 pt-2' + (busy ? ' pointer-events-none' : '')}
         role="group" aria-label="音频波形和截取选区" aria-disabled={busy}
-        aria-keyshortcuts="Space ArrowUp ArrowDown ArrowLeft ArrowRight Shift+ArrowLeft Shift+ArrowRight Delete Control+Z Control+S"
+        aria-keyshortcuts="Space ArrowUp ArrowDown ArrowLeft ArrowRight Shift+ArrowLeft Shift+ArrowRight Delete Control+Z Control+Y Control+Shift+Z Control+S"
         tabIndex={busy ? -1 : 0} ref={container} onClickCapture={selectRegion} onKeyDown={navigateRegions} />
       {(waveform.isError || renderError) && <p role="alert" className="text-xs text-mid">波形加载失败，可以继续用起点和终点输入框截取。</p>}
       {!ready && !waveform.isError && !renderError && <p className="text-xs text-lo">正在加载波形…</p>}
