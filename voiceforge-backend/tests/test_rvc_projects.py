@@ -321,6 +321,30 @@ def test_manual_edit_uses_the_source_timeline(client, speech, monkeypatch):
         assert wav.readframes(wav.getnframes()) == source_samples[begin:end].astype("<i2").tobytes()
     assert client.post(merge_url, json=selected).status_code == 400
 
+    trim_url = base + "/clips/" + merged["id"] + "/trim"
+    assert client.post(trim_url, json={"start": 0, "end": merged["duration"]}).status_code == 400
+    assert client.post(trim_url, json={"start": 0.2, "end": merged["duration"] + 1}).status_code == 400
+
+    def unavailable_source(*args):
+        raise AssertionError("Trimming a clip must not read the original source")
+
+    with monkeypatch.context() as patch:
+        patch.setattr("processing.rvc_edit.prepare_source_audio", unavailable_source)
+        trimmed_clip = post(client, trim_url, {"start": 0.25, "end": 0.65})
+        assert post(client, trim_url, {"start": 0.25, "end": 0.65})["id"] == trimmed_clip["id"]
+    assert trimmed_clip["id"] != merged["id"] and trimmed_clip["source_id"] == merged["source_id"]
+    assert trimmed_clip["quality"]["edit"] == "trim" and trimmed_clip["review"] == "pending"
+    assert trimmed_clip["start"] == round(merged["start"] + 0.25, 6)
+    assert trimmed_clip["end"] == round(merged["start"] + 0.65, 6)
+    with wave.open(io.BytesIO(clip_audio(merged).content)) as parent:
+        parent.setpos(12000)
+        expected = parent.readframes(19200)
+    with wave.open(io.BytesIO(clip_audio(trimmed_clip).content)) as wav:
+        assert wav.getnframes() == 19200
+        assert wav.readframes(wav.getnframes()) == expected
+    assert clip_audio(merged).status_code == 200
+    assert client.get(buffer_url).json()["clips"] == []
+
     # Reuse an already-created range, as with merges made before replacement was supported.
     saved = post(client, source_base + "/clips", {"start": merged["start"], "end": third["end"]})
     reused = post(client, merge_url, {"clip_ids": [merged["id"], third["id"]]})
@@ -328,13 +352,15 @@ def test_manual_edit_uses_the_source_timeline(client, speech, monkeypatch):
     assert {row["id"] for row in client.get(buffer_url).json()["clips"]} == {merged["id"], third["id"]}
     assert clip_audio(merged).status_code == clip_audio(third).status_code == 200
     assert clip_audio(reused).content.startswith(b"RIFF")
+    same_range = post(client, base + "/clips/" + reused["id"] + "/trim", {"start": 0.25, "end": 0.65})
+    assert same_range["id"] == trimmed_clip["id"]
 
     trimmed = post(client, source_base + "/clips", {"start": 0.25, "end": 0.65})
     assert trimmed["duration"] == 0.4 and trimmed["quality"]["edit"] == "cut"
     with wave.open(io.BytesIO(clip_audio(trimmed).content)) as wav:
         assert wav.readframes(wav.getnframes()) == source_samples[12000:31200].astype("<i2").tobytes()
     assert client.post(source_base + "/clips", json={"start": 0, "end": info["duration"] + 0.2}).status_code == 400
-    assert client.get(base).json()["review"]["pending"]["count"] == len(clips)
+    assert client.get(base).json()["review"]["pending"]["count"] == len(clips) + 1
 
 
 def test_failed_download_retry_and_silence(client, speech, monkeypatch):

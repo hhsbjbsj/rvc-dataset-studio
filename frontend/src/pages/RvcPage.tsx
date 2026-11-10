@@ -1,7 +1,7 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { isAxiosError } from 'axios'
-import { RvcManualEditor } from '@/components/RvcManualEditor'
+import { RvcAudioRangeEditor, RvcManualEditor } from '@/components/RvcManualEditor'
 import { RvcSources, type Project, type RunAction } from '@/components/RvcSources'
 import { api } from '@/lib/api'
 import { API_URL } from '@/lib/config'
@@ -15,7 +15,7 @@ type Source = {
 type Review = 'pending' | 'kept' | 'excluded'
 type Clip = {
   id: string; source_title: string; origin: string; start: number; end: number; duration: number
-  review: Review; quality: { score: number; rms_db: number; snr_db: number; clip_ratio: number; edit?: 'cut' | 'merge' }
+  review: Review; quality: { score: number; rms_db: number; snr_db: number; clip_ratio: number; edit?: 'cut' | 'merge' | 'trim' }
 }
 type ManualClip = Clip & { replaced_count?: number }
 type ProjectDetails = Project & { sources: Source[]; review: Partial<Record<Review, { count: number; seconds: number }>> }
@@ -61,6 +61,9 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
   const [sampleRate, setSampleRate] = useState(40000)
   const [exports, setExports] = useState<ExportBatch[]>([])
   const [manualClip, setManualClip] = useState<ManualClip>()
+  const [trimTarget, setTrimTarget] = useState<Clip>()
+  const trimPanel = useRef<HTMLDivElement>(null)
+  const manualResult = useRef<HTMLDivElement>(null)
   const [bufferOpen, setBufferOpen] = useState(false)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string>()
   const details = useQuery({
@@ -90,6 +93,10 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
       if (page > lastPage) setPage(lastPage)
     }
   }, [totalClips, page])
+  const trimTargetId = trimTarget?.id
+  useEffect(() => {
+    if (trimTargetId) trimPanel.current?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+  }, [trimTargetId])
   const refresh = () => { void queryClient.invalidateQueries({ queryKey: ['rvc-project', id] }) }
 
   function process(sourceIds?: string[]) {
@@ -112,14 +119,16 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
 
   function saveManualClip(path: string, payload: { start: number; end: number } | { clip_ids: string[] }) {
     const merging = 'clip_ids' in payload
+    const trimming = path.endsWith('/trim')
     run(merging ? '合并所选片段' : '生成手工片段', async () => {
-      setManualClip(undefined)
       const { data } = await api.post<ManualClip>(base + path, payload)
-      if (merging) setSelected([data.id])
-      await queryClient.invalidateQueries({ queryKey: bufferKey })
+      if (merging || trimming) setSelected([data.id])
       setManualClip(data)
+      setTrimTarget(merging ? data : undefined)
+      await queryClient.invalidateQueries({ queryKey: bufferKey })
       refresh()
       await queryClient.invalidateQueries({ queryKey: ['rvc-clips', id] })
+      if (trimming) manualResult.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
     })
   }
 
@@ -224,14 +233,33 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
         <RvcManualEditor base={base} sources={sources.filter(source => source.status === 'done')} busy={busy} run={run}
           onSave={(sourceId, start, end) => saveManualClip('/sources/' + sourceId + '/clips', { start, end })} />
         {manualClip && (
-          <div className="hairline-b space-y-2 pb-4" aria-label="手工片段结果">
+          <div ref={manualResult} className="hairline-b scroll-mt-24 space-y-2 pb-4" aria-label="手工片段结果">
             <p className="text-sm text-hi" role="status">
-              {manualClip.replaced_count === undefined ? '手工片段已就绪' : '合并完成，已将 ' + manualClip.replaced_count + ' 段旧片段移入缓冲区'}
+              {manualClip.replaced_count === undefined
+                ? (manualClip.quality.edit === 'trim' ? '截取完成，新片段已勾选' : '手工片段已就绪')
+                : '合并完成，已将 ' + manualClip.replaced_count + ' 段旧片段移入缓冲区'}
               {' · '}{timestamp(manualClip.start)}–{timestamp(manualClip.end)}
             </p>
-            <audio className="h-9 max-w-full" controls preload="none" aria-label="试听手工片段"
-              src={API_URL + base + '/clips/' + manualClip.id + '/audio'} />
+            {trimTarget?.id !== manualClip.id && (
+              <div className="flex flex-wrap items-center gap-2">
+                <audio className="h-9 max-w-full" controls preload="none" aria-label="试听手工片段"
+                  src={API_URL + base + '/clips/' + manualClip.id + '/audio'} />
+                <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => setTrimTarget(manualClip)}>从这段截取</button>
+              </div>
+            )}
             <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => setSelected([manualClip.id])}>只勾选这个手工片段</button>
+          </div>
+        )}
+        {trimTarget && (
+          <div ref={trimPanel} className="hairline-b scroll-mt-24 space-y-3 pb-4" aria-label="从片段截取">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className="font-medium text-hi">从片段截取</h3>
+              <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => setTrimTarget(undefined)}>关闭截取</button>
+            </div>
+            <p className="text-sm text-lo">{trimTarget.source_title} · 原素材 {timestamp(trimTarget.start)}–{timestamp(trimTarget.end)}</p>
+            <RvcAudioRangeEditor key={trimTarget.id} offset={0} duration={trimTarget.duration} busy={busy} fromClip
+              audioUrl={API_URL + base + '/clips/' + trimTarget.id + '/audio'}
+              onSave={(start, end) => saveManualClip('/clips/' + trimTarget.id + '/trim', { start, end })} />
           </div>
         )}
         <details className="hairline-b space-y-3 pb-4" onToggle={e => {
@@ -330,6 +358,7 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
               <audio className="h-9 max-w-full" controls preload="none" aria-label={'试听 ' + clip.source_title + ' ' + timestamp(clip.start)}
                 src={API_URL + base + '/clips/' + clip.id + '/audio'} />
               <div className="flex flex-wrap gap-2">
+                <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => setTrimTarget(clip)}>从这段截取</button>
                 {clip.review !== 'kept' && <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => review([clip.id], 'kept')}>保留</button>}
                 {clip.review !== 'excluded' && <button className="btn btn-danger btn-sm" disabled={busy} onClick={() => review([clip.id], 'excluded')}>剔除</button>}
                 {clip.review !== 'pending' && <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => review([clip.id], 'pending')}>撤销审核</button>}

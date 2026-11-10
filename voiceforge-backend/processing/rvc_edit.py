@@ -88,16 +88,55 @@ def create_edit(
         raise MediaError(f"请选择原音轨内起点早于终点、时长不超过 {MAX_EDIT_SECONDS} 秒的范围。")
 
     path = prepare_source_audio(source)
-    with sf.SoundFile(str(path)) as audio:
-        first = max(0, round((start - offset) * WORK_RATE))
-        last = round((end - offset) * WORK_RATE)
-        if not first < last <= audio.frames:
-            raise MediaError("所选范围超出了原音轨。")
-        audio.seek(first)
-        raw = audio.read(last - first, dtype="int16").astype("<i2", copy=False).tobytes()
+    first = max(0, round((start - offset) * WORK_RATE))
+    last = round((end - offset) * WORK_RATE)
+    raw, _ = read_edit_range(path, first, last)
+    return save_edit(
+        db, source, raw, offset=offset, first=first,
+        digest_key=f"manual:{source.id}:{first}:{last}:", method=method,
+        normalize=source.options.get("normalize", False), replace=replace,
+    )
 
+
+def trim_clip(db: Session, source: RvcSource, clip: RvcClip, start: float, end: float) -> dict:
+    if start < 0 or end <= start or end - start > MAX_EDIT_SECONDS:
+        raise MediaError(f"请选择起点早于终点、时长不超过 {MAX_EDIT_SECONDS} 秒的范围。")
+
+    first, last = round(start * WORK_RATE), round(end * WORK_RATE)
+    path = clip_path(clip)
+    raw, frames = read_edit_range(path, first, last)
+    if first == 0 and last == frames:
+        raise MediaError("请缩小截取范围，以生成新的片段。")
+    source_frame = round((clip.start - source_offset(source)) * WORK_RATE)
+    return save_edit(
+        db, source, raw, offset=clip.start, first=first,
+        digest_key=f"trim:{source.id}:{source_frame + first}:{source_frame + last}:",
+        method="trim", normalize=False,
+    )
+
+
+def read_edit_range(path: Path, first: int, last: int) -> tuple[bytes, int]:
+    try:
+        with sf.SoundFile(str(path)) as audio:
+            if audio.samplerate != WORK_RATE or audio.channels != 1:
+                raise MediaError("音频格式与工作台片段格式不匹配。")
+            if not 0 <= first < last <= audio.frames:
+                raise MediaError("所选范围超出了当前音频。")
+            audio.seek(first)
+            samples = audio.read(last - first, dtype="int16")
+            if len(samples) != last - first:
+                raise MediaError("当前音频文件不完整。")
+            return samples.astype("<i2", copy=False).tobytes(), audio.frames
+    except sf.LibsndfileError as exc:
+        raise MediaError("当前音频文件无法读取。") from exc
+
+
+def save_edit(
+    db: Session, source: RvcSource, raw: bytes, *, offset: float, first: int,
+    digest_key: str, method: str, normalize: bool, replace: list[RvcClip] | None = None,
+) -> dict:
     project_id = source.project_id
-    digest = hashlib.sha256(f"manual:{source.id}:{first}:{last}:".encode() + raw).hexdigest()
+    digest = hashlib.sha256(digest_key.encode() + raw).hexdigest()
     existing = select(RvcClip).where(RvcClip.project_id == project_id, RvcClip.digest == digest)
     clip = db.scalar(existing)
     buffered_result = db.get(RvcMergeBuffer, clip.id) if clip is not None else None
@@ -109,11 +148,12 @@ def create_edit(
     try:
         if clip is None:
             generation = new_id()
-            directory = path.parent / generation
-            check_space(path.parent, len(raw))
+            root = work_dir(project_id, source.id)
+            directory = root / generation
+            check_space(root, len(raw))
             directory.mkdir()
             destination = directory / "000001.wav"
-            data = write_clip(raw, destination, offset, first, source.options.get("normalize", False), manual=True)
+            data = write_clip(raw, destination, offset, first, normalize, manual=True)
             data["digest"] = digest
             data["quality"]["edit"] = method
             clip = RvcClip(id=new_id(), project_id=project_id, source_id=source.id, generation=generation, **data)
