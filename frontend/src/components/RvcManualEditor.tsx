@@ -147,12 +147,24 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
     if (index < 0) return
     if (!redo) restoredDraftIds.current = []
     removedDrafts.current.push({ draft: drafts[index], index })
-    if (redo || id === active?.id) {
-      const waveIndex = waveRanges.findIndex(range => range.id === id)
-      const neighbor = waveRanges[waveIndex + 1] ?? waveRanges[waveIndex - 1]
+    const waveIndex = waveRanges.findIndex(range => range.id === id)
+    const next = waveRanges[waveIndex + 1]
+    const selectNeighbor = redo || id === active?.id
+    if (selectNeighbor) {
+      const neighbor = next ?? waveRanges[waveIndex - 1]
       setActiveId(neighbor?.id)
     }
-    if (preview.current?.id === id) stopPreview()
+    const current = preview.current
+    const audio = player.current
+    const removedPreview = current?.id === id
+    const advanceLoop = (selectNeighbor || removedPreview) && waveIndex >= 0
+      && current?.loop && !current.suspended && audio && (!audio.paused || audio.ended)
+    if (advanceLoop) {
+      const nextDraft = next && drafts.find(draft => draft.id === next.id)
+      if (!nextDraft || !previewRange(nextDraft, true)) stopPreview()
+    } else if (removedPreview) {
+      stopPreview()
+    }
     setDrafts(previous => previous.filter(draft => draft.id !== id))
     waveform.current?.focus({ preventScroll: true })
   }
@@ -269,7 +281,7 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
 
   function previewRange(draft: Draft, loop: boolean) {
     const audio = player.current
-    if (!audio || rangeError(draft)) return
+    if (!audio || rangeError(draft)) return false
     setPlaybackError('')
     setActiveId(draft.id)
     const current = { id: draft.id, start: Number(draft.start) - offset, end: Number(draft.end) - offset, loop, suspended: false }
@@ -277,6 +289,7 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
     setLoopingId(loop ? draft.id : undefined)
     audio.currentTime = current.start
     playPreview(audio, current)
+    return true
   }
 
   return (
@@ -395,7 +408,7 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
       </div>
       {hasDuplicates && <p className="text-xs text-lo">有重复的选区，请调整或移除后再保存。</p>}
       {drafts.length >= MAX_RANGES && <p className="text-xs text-lo">已达到单批 50 段的上限。</p>}
-      <p className="text-xs text-lo">Delete 或小键盘 Del 移除当前选区。Ctrl+Z 撤销移除，Ctrl+Y 重做移除。Ctrl+S 保存剩余选区，每段生成一个独立的原速 WAV。</p>
+      <p className="text-xs text-lo">Delete 或小键盘 Del 移除当前选区。Ctrl+Z 撤销移除，Ctrl+Y 重做移除。循环试听时移除选区，会从下一段开头继续。Ctrl+S 保存剩余选区，每段生成一个独立的原速 WAV。</p>
       {playbackError && <p role="alert" className="text-sm text-mid">{playbackError}</p>}
     </div>
   )
