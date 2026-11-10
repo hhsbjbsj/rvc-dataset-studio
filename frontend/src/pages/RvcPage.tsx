@@ -17,6 +17,7 @@ type Clip = {
   id: string; source_title: string; origin: string; start: number; end: number; duration: number
   review: Review; quality: { score: number; rms_db: number; snr_db: number; clip_ratio: number; edit?: 'cut' | 'merge' }
 }
+type ManualClip = Clip & { replaced_count?: number }
 type ProjectDetails = Project & { sources: Source[]; review: Partial<Record<Review, { count: number; seconds: number }>> }
 type ExportResult = { directory: string; count: number; duration_seconds: number; download_url: string }
 type ExportBatch = ExportResult & { scope: "selected" | "kept" }
@@ -59,7 +60,7 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
   const [selected, setSelected] = useState<string[]>([])
   const [sampleRate, setSampleRate] = useState(40000)
   const [exports, setExports] = useState<ExportBatch[]>([])
-  const [manualClip, setManualClip] = useState<Clip>()
+  const [manualClip, setManualClip] = useState<ManualClip>()
   const details = useQuery({
     queryKey: ['rvc-project', id],
     queryFn: async () => (await api.get<ProjectDetails>(base)).data,
@@ -74,6 +75,13 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
   useEffect(() => {
     void queryClient.invalidateQueries({ queryKey: ['rvc-clips', id] })
   }, [id, queryClient, revision])
+  const totalClips = clipPage.data?.total
+  useEffect(() => {
+    if (totalClips !== undefined) {
+      const lastPage = Math.max(1, Math.ceil(totalClips / 100))
+      if (page > lastPage) setPage(lastPage)
+    }
+  }, [totalClips, page])
   const refresh = () => { void queryClient.invalidateQueries({ queryKey: ['rvc-project', id] }) }
 
   function process(sourceIds?: string[]) {
@@ -95,8 +103,11 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
   }
 
   function saveManualClip(path: string, payload: { start: number; end: number } | { clip_ids: string[] }) {
-    run('生成手工片段', async () => {
-      const { data } = await api.post<Clip>(base + path, payload)
+    const merging = 'clip_ids' in payload
+    run(merging ? '合并所选片段' : '生成手工片段', async () => {
+      setManualClip(undefined)
+      const { data } = await api.post<ManualClip>(base + path, payload)
+      if (merging) setSelected([data.id])
       setManualClip(data)
       refresh()
       await queryClient.invalidateQueries({ queryKey: ['rvc-clips', id] })
@@ -190,7 +201,10 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
           onSave={(sourceId, start, end) => saveManualClip('/sources/' + sourceId + '/clips', { start, end })} />
         {manualClip && (
           <div className="hairline-b space-y-2 pb-4" aria-label="手工片段结果">
-            <p className="text-sm text-hi">手工片段已就绪 · {timestamp(manualClip.start)}–{timestamp(manualClip.end)}</p>
+            <p className="text-sm text-hi" role="status">
+              {manualClip.replaced_count === undefined ? '手工片段已就绪' : '合并完成，已替换 ' + manualClip.replaced_count + ' 段'}
+              {' · '}{timestamp(manualClip.start)}–{timestamp(manualClip.end)}
+            </p>
             <audio className="h-9 max-w-full" controls preload="none" aria-label="试听手工片段"
               src={API_URL + base + '/clips/' + manualClip.id + '/audio'} />
             <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => setSelected([manualClip.id])}>只勾选这个手工片段</button>
@@ -211,7 +225,7 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
             <button className="btn btn-secondary btn-sm" disabled={busy || !hasSelection || selected.length < 2}
               onClick={() => saveManualClip('/clips/merge', { clip_ids: selected })}>合并所选片段</button>
             <span className="text-sm text-mid" aria-live="polite">已勾选 {selected.length} 段</span>
-            {selected.length >= 2 && <p className="w-full text-xs text-lo">同一素材中的片段可合并。新片段会包含最早起点到最晚终点之间的原音。</p>}
+            {selected.length >= 2 && <p className="w-full text-xs text-lo">同一素材中的片段可合并。合并成功后，新片段会替换所选旧片段，并保留起点到终点之间的原音。</p>}
           </div>
         )}
         {!!(clipPage.data?.total || selected.length || exports.length) && (

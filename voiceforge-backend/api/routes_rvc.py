@@ -31,6 +31,8 @@ SampleRate = Literal[16000, 22050, 24000, 32000, 40000, 44100, 48000]
 Identifier = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)]
 picker_lock = Lock()
+# Exports must finish reading selected WAVs before a merge removes them.
+clip_file_lock = Lock()
 
 
 def require_local(request: Request) -> None:
@@ -351,27 +353,31 @@ def original_audio(project_id: Identifier, source_id: Identifier, db: DB):
 
 @router.post("/projects/{project_id}/sources/{source_id}/clips")
 def cut_clip(project_id: Identifier, source_id: Identifier, data: ClipRange, db: DB):
-    source = get_editable_source(db, project_id, source_id)
-    try:
-        return create_edit(db, source, data.start, data.end, "cut")
-    except MediaError as exc:
-        raise HTTPException(400, str(exc)) from exc
+    with clip_file_lock:
+        source = get_editable_source(db, project_id, source_id)
+        try:
+            return create_edit(db, source, data.start, data.end, "cut")
+        except MediaError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
 
 @router.post("/projects/{project_id}/clips/merge")
 def merge_clips(project_id: Identifier, data: MergeInput, db: DB):
-    ids = set(data.clip_ids)
-    clips = db.scalars(select(RvcClip).where(RvcClip.project_id == project_id, RvcClip.id.in_(ids))).all()
-    if len(clips) != len(ids) or len(clips) < 2:
-        raise HTTPException(400, "请选择当前项目中的至少两个片段。")
-    source_ids = {clip.source_id for clip in clips}
-    if len(source_ids) != 1:
-        raise HTTPException(400, "请选择同一项素材里的片段。")
-    source = get_editable_source(db, project_id, clips[0].source_id)
-    try:
-        return create_edit(db, source, min(clip.start for clip in clips), max(clip.end for clip in clips), "merge")
-    except MediaError as exc:
-        raise HTTPException(400, str(exc)) from exc
+    with clip_file_lock:
+        ids = set(data.clip_ids)
+        clips = db.scalars(select(RvcClip).where(RvcClip.project_id == project_id, RvcClip.id.in_(ids))).all()
+        if len(clips) != len(ids) or len(clips) < 2:
+            raise HTTPException(400, "请选择当前项目中仍存在的至少两个片段。")
+        source_ids = {clip.source_id for clip in clips}
+        if len(source_ids) != 1:
+            raise HTTPException(400, "请选择同一项素材里的片段。")
+        source = get_editable_source(db, project_id, clips[0].source_id)
+        try:
+            return create_edit(
+                db, source, min(clip.start for clip in clips), max(clip.end for clip in clips), "merge", replace=clips,
+            )
+        except MediaError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
 
 @router.get("/projects/{project_id}/clips")
@@ -406,27 +412,28 @@ def review_clips(project_id: Identifier, data: ReviewInput, db: DB):
 
 @router.post("/projects/{project_id}/export")
 def export_project(project_id: Identifier, data: ExportInput, db: DB):
-    project = project_data(get_project(db, project_id))
-    selected = set(data.clip_ids) if data.clip_ids is not None else None
-    selection = RvcClip.review == "kept" if selected is None else RvcClip.id.in_(selected)
-    rows = db.execute(
-        select(RvcClip, RvcSource).join(RvcSource)
-        .where(RvcClip.project_id == project_id, selection)
-        .order_by(RvcSource.created_at, RvcClip.start, RvcClip.id)
-    ).all()
-    if selected is not None and len(rows) != len(selected):
-        raise HTTPException(400, "部分所选片段已不存在或不属于此项目，请重新选择。")
-    entries = [
-        {"clip": clip_data(clip, source), "source": source_data(source), "path": clip_path(clip)}
-        for clip, source in rows
-    ]
-    db.close()
-    try:
-        result = export_dataset(project, entries, data.sample_rate)
-    except MediaError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    result["download_url"] = f"/api/rvc/projects/{project_id}/exports/{result['export_id']}"
-    return result
+    with clip_file_lock:
+        project = project_data(get_project(db, project_id))
+        selected = set(data.clip_ids) if data.clip_ids is not None else None
+        selection = RvcClip.review == "kept" if selected is None else RvcClip.id.in_(selected)
+        rows = db.execute(
+            select(RvcClip, RvcSource).join(RvcSource)
+            .where(RvcClip.project_id == project_id, selection)
+            .order_by(RvcSource.created_at, RvcClip.start, RvcClip.id)
+        ).all()
+        if selected is not None and len(rows) != len(selected):
+            raise HTTPException(400, "部分所选片段已不存在或不属于此项目，请重新选择。")
+        entries = [
+            {"clip": clip_data(clip, source), "source": source_data(source), "path": clip_path(clip)}
+            for clip, source in rows
+        ]
+        db.close()
+        try:
+            result = export_dataset(project, entries, data.sample_rate)
+        except MediaError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        result["download_url"] = f"/api/rvc/projects/{project_id}/exports/{result['export_id']}"
+        return result
 
 
 @router.get("/projects/{project_id}/exports/{export_id}")

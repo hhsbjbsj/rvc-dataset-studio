@@ -1,20 +1,22 @@
 """Prepare source audio for playback and save manual edits against its timeline."""
 
 import hashlib
+import logging
 import os
 import tempfile
 from pathlib import Path
 from threading import Lock
 
 import soundfile as sf
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from processing.rvc_audio import MediaError, WORK_RATE, check_space, ffmpeg, media_path, write_clip
-from rvc_projects import RvcClip, RvcSource, clip_data, new_id, work_dir
+from rvc_projects import RvcClip, RvcSource, clip_data, clip_path, new_id, work_dir
 from sources.rvc_online import download
 
+logger = logging.getLogger(__name__)
 _cache_lock = Lock()
 MAX_EDIT_SECONDS = 120
 
@@ -77,7 +79,10 @@ def source_audio_info(source: RvcSource) -> dict:
     return {"duration": info.frames / info.samplerate, "offset": source_offset(source)}
 
 
-def create_edit(db: Session, source: RvcSource, start: float, end: float, method: str) -> dict:
+def create_edit(
+    db: Session, source: RvcSource, start: float, end: float, method: str,
+    *, replace: list[RvcClip] | None = None,
+) -> dict:
     offset = source_offset(source)
     if start < offset - 0.000001 or end <= start or end - start > MAX_EDIT_SECONDS:
         raise MediaError(f"请选择原音轨内起点早于终点、时长不超过 {MAX_EDIT_SECONDS} 秒的范围。")
@@ -94,31 +99,54 @@ def create_edit(db: Session, source: RvcSource, start: float, end: float, method
     project_id = source.project_id
     digest = hashlib.sha256(f"manual:{source.id}:{first}:{last}:".encode() + raw).hexdigest()
     existing = select(RvcClip).where(RvcClip.project_id == project_id, RvcClip.digest == digest)
-    if clip := db.scalar(existing):
+    clip = db.scalar(existing)
+    if clip is not None and replace is None:
         return clip_data(clip, source)
 
-    generation = new_id()
-    directory = path.parent / generation
-    check_space(path.parent, len(raw))
-    directory.mkdir()
-    destination = directory / "000001.wav"
+    destination = None
+    retired_paths = []
     try:
-        data = write_clip(raw, destination, offset, first, source.options.get("normalize", False), manual=True)
-        data["digest"] = digest
-        data["quality"]["edit"] = method
-        clip = RvcClip(project_id=project_id, source_id=source.id, generation=generation, **data)
-        db.add(clip)
+        if clip is None:
+            generation = new_id()
+            directory = path.parent / generation
+            check_space(path.parent, len(raw))
+            directory.mkdir()
+            destination = directory / "000001.wav"
+            data = write_clip(raw, destination, offset, first, source.options.get("normalize", False), manual=True)
+            data["digest"] = digest
+            data["quality"]["edit"] = method
+            clip = RvcClip(id=new_id(), project_id=project_id, source_id=source.id, generation=generation, **data)
+            db.add(clip)
+
+        if replace is not None:
+            retired = [item for item in replace if item.id != clip.id]
+            retired_paths = [clip_path(item) for item in retired]
+            deleted = db.execute(
+                delete(RvcClip).where(RvcClip.project_id == project_id, RvcClip.id.in_([item.id for item in retired]))
+            )
+            if deleted.rowcount != len(retired):
+                raise MediaError("所选片段已被修改，请重新选择。")
         db.commit()
-    except IntegrityError:
+    except Exception as exc:
         db.rollback()
-        destination.unlink(missing_ok=True)
-        directory.rmdir()
-        if clip := db.scalar(existing):
-            return clip_data(clip, source)
+        if destination is not None:
+            destination.unlink(missing_ok=True)
+            destination.parent.rmdir()
+        if isinstance(exc, IntegrityError):
+            if replace is None and (clip := db.scalar(existing)) is not None:
+                return clip_data(clip, source)
+            raise MediaError("片段已被另一项操作修改，请重新选择。") from exc
         raise
-    except Exception:
-        db.rollback()
-        destination.unlink(missing_ok=True)
-        directory.rmdir()
-        raise
-    return clip_data(clip, source)
+
+    for retired_path in retired_paths:
+        try:
+            retired_path.unlink(missing_ok=True)
+            if retired_path.parent.is_dir() and not any(retired_path.parent.iterdir()):
+                retired_path.parent.rmdir()
+        except OSError:
+            logger.warning("Could not remove replaced audio file %s", retired_path, exc_info=True)
+
+    result = clip_data(clip, source)
+    if replace is not None:
+        result["replaced_count"] = len(retired_paths)
+    return result

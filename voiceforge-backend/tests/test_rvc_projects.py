@@ -16,7 +16,10 @@ import pytest
 import soundfile as sf
 from fastapi.testclient import TestClient
 
+from database import SessionLocal
 from main import app
+from processing.rvc_audio import MediaError
+from rvc_projects import RvcClip, clip_path
 from sources.rvc_online import normalize_url
 
 VIDEO = "https://www.bilibili.com/video/BV1n44y1Q7sc"
@@ -254,7 +257,7 @@ def test_windows_mixed_media_review_and_export(client, speech, monkeypatch):
             assert (first.getnchannels(), first.getsampwidth(), first.getframerate()) == (1, 2, 40000)
 
 
-def test_manual_edit_uses_the_source_timeline(client, speech):
+def test_manual_edit_uses_the_source_timeline(client, speech, monkeypatch):
     _, source_file, _ = speech
     base = new_project(client)
     assert post(client, base + "/sources/local", {"kind": "local_audio", "paths": [str(source_file)]})["added"] == 1
@@ -272,27 +275,54 @@ def test_manual_edit_uses_the_source_timeline(client, speech):
     assert rate == 48000
 
     clips = client.get(base + "/clips").json()["clips"]
-    first, second = clips[:2]
+    first, second, third = clips[:3]
     assert first["end"] < second["start"]
-    merged = post(client, base + "/clips/merge", {"clip_ids": [second["id"], first["id"]]})
-    assert (merged["start"], merged["end"]) == (first["start"], second["end"])
-    assert merged["review"] == "pending" and merged["quality"]["edit"] == "merge"
+    merge_url = base + "/clips/merge"
+    selected = {"clip_ids": [second["id"], first["id"]]}
 
     def clip_audio(clip):
-        return client.get(base + "/clips/" + clip["id"] + "/audio").content
+        return client.get(base + "/clips/" + clip["id"] + "/audio")
 
-    with wave.open(io.BytesIO(clip_audio(merged))) as wav:
+    with SessionLocal() as db:
+        old_paths = [clip_path(db.get(RvcClip, item["id"])) for item in (first, second)]
+
+    def fail_write(raw, path, *args, **kwargs):
+        path.write_bytes(b"incomplete")
+        raise MediaError("模拟写入失败")
+
+    with monkeypatch.context() as patch:
+        patch.setattr("processing.rvc_edit.write_clip", fail_write)
+        assert client.post(merge_url, json=selected).status_code == 400
+    assert all(path.is_file() for path in old_paths)
+    assert client.get(base + "/clips").json()["total"] == len(clips)
+
+    merged = post(client, merge_url, selected)
+    assert (merged["start"], merged["end"]) == (first["start"], second["end"])
+    assert merged["review"] == "pending" and merged["quality"]["edit"] == "merge"
+    assert merged["replaced_count"] == 2
+    assert client.get(base + "/clips").json()["total"] == len(clips) - 1
+    assert clip_audio(first).status_code == clip_audio(second).status_code == 404
+    assert not any(path.exists() for path in old_paths)
+    assert client.post(base + "/export", json=selected).status_code == 400
+
+    with wave.open(io.BytesIO(clip_audio(merged).content)) as wav:
         begin, end = (round(merged[key] * rate) for key in ("start", "end"))
         assert wav.readframes(wav.getnframes()) == source_samples[begin:end].astype("<i2").tobytes()
-    assert post(client, base + "/clips/merge", {"clip_ids": [first["id"], second["id"]]})["id"] == merged["id"]
+    assert client.post(merge_url, json=selected).status_code == 400
+
+    # Reuse an already-created range, as with merges made before replacement was supported.
+    saved = post(client, source_base + "/clips", {"start": merged["start"], "end": third["end"]})
+    reused = post(client, merge_url, {"clip_ids": [merged["id"], third["id"]]})
+    assert reused["id"] == saved["id"] and reused["replaced_count"] == 2
+    assert clip_audio(merged).status_code == clip_audio(third).status_code == 404
+    assert clip_audio(reused).content.startswith(b"RIFF")
 
     trimmed = post(client, source_base + "/clips", {"start": 0.25, "end": 0.65})
     assert trimmed["duration"] == 0.4 and trimmed["quality"]["edit"] == "cut"
-    with wave.open(io.BytesIO(clip_audio(trimmed))) as wav:
+    with wave.open(io.BytesIO(clip_audio(trimmed).content)) as wav:
         assert wav.readframes(wav.getnframes()) == source_samples[12000:31200].astype("<i2").tobytes()
     assert client.post(source_base + "/clips", json={"start": 0, "end": info["duration"] + 0.2}).status_code == 400
-    assert client.get(base).json()["review"]["pending"]["count"] == len(clips) + 2
-    assert clip_audio(first).startswith(b"RIFF") and clip_audio(second).startswith(b"RIFF")
+    assert client.get(base).json()["review"]["pending"]["count"] == len(clips) - 1
 
 
 def test_failed_download_retry_and_silence(client, speech, monkeypatch):
