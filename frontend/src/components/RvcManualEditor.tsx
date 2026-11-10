@@ -308,7 +308,7 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
         <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => mark('end')}>标记终点</button>
       </div>}
       {active && <p className="text-xs text-lo">
-        ← / → 调起点，Shift + ← / → 调终点，时间框用 ↑ / ↓，每次 0.01 秒。空格循环试听当前选区，再按暂停或继续。
+        聚焦波形后用 ↑ / ↓ 切换选区。← / → 调起点，Shift + ← / → 调终点，时间框用 ↑ / ↓，每次 0.01 秒。空格循环试听当前选区，再按暂停或继续。
       </p>}
       <div className="flex flex-wrap items-center gap-2">
         <button className="btn btn-secondary btn-sm" disabled={busy || drafts.length >= MAX_RANGES} onClick={() => {

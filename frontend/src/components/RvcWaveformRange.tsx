@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type MouseEvent, type RefObject } from 'react'
+import { useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type RefObject } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import WaveSurfer from 'wavesurfer.js'
 import Regions, { type Region } from 'wavesurfer.js/dist/plugins/regions.esm.js'
@@ -133,6 +133,25 @@ export function RvcWaveformRange({ path, player, duration, offset, ranges, activ
     onSelect(region.id)
   }
 
+  function navigateRegions(event: KeyboardEvent<HTMLDivElement>) {
+    if (busy || !ranges.length || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.nativeEvent.isComposing) return
+    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return
+    event.preventDefault()
+    const ordered = [...ranges].sort((a, b) => a.start - b.start || a.end - b.end)
+    const index = ordered.findIndex(range => range.id === activeId)
+    const previous = event.key === 'ArrowUp'
+    const nextIndex = previous && index < 0 ? ordered.length - 1 : index + (previous ? -1 : 1)
+    const next = ordered[nextIndex]
+    if (!next) return
+    onSelect(next.id)
+
+    const wave = instance.current
+    if (!wave || !ready || zoom === 1) return
+    const start = next.start * wave.getWrapper().clientWidth / duration
+    const left = wave.getScroll()
+    if (start < left || start >= left + wave.getWidth()) wave.setScrollTime(next.start)
+  }
+
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -146,8 +165,8 @@ export function RvcWaveformRange({ path, player, duration, offset, ranges, activ
       </div>
       <div className={'rvc-waveform min-h-24 rounded-md border border-white/10 bg-black/5 px-2 pt-2' + (busy ? ' pointer-events-none' : '')}
         role="group" aria-label="音频波形和截取选区" aria-disabled={busy}
-        aria-keyshortcuts="Space ArrowLeft ArrowRight Shift+ArrowLeft Shift+ArrowRight"
-        tabIndex={busy ? -1 : 0} ref={container} onClickCapture={selectRegion} />
+        aria-keyshortcuts="Space ArrowUp ArrowDown ArrowLeft ArrowRight Shift+ArrowLeft Shift+ArrowRight"
+        tabIndex={busy ? -1 : 0} ref={container} onClickCapture={selectRegion} onKeyDown={navigateRegions} />
       {(waveform.isError || renderError) && <p role="alert" className="text-xs text-mid">波形加载失败，可以继续用起点和终点输入框截取。</p>}
       {!ready && !waveform.isError && !renderError && <p className="text-xs text-lo">正在加载波形…</p>}
     </div>
