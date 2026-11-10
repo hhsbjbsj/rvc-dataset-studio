@@ -13,6 +13,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+import soundfile as sf
 from fastapi.testclient import TestClient
 
 from main import app
@@ -251,6 +252,47 @@ def test_windows_mixed_media_review_and_export(client, speech, monkeypatch):
         assert {"metadata.json", "sources.json", "quality_report.json"} <= set(bundle.namelist())
         with wave.open(io.BytesIO(bundle.read("wavs/000001.wav"))) as first:
             assert (first.getnchannels(), first.getsampwidth(), first.getframerate()) == (1, 2, 40000)
+
+
+def test_manual_edit_uses_the_source_timeline(client, speech):
+    _, source_file, _ = speech
+    base = new_project(client)
+    assert post(client, base + "/sources/local", {"kind": "local_audio", "paths": [str(source_file)]})["added"] == 1
+    source = client.get(base).json()["sources"][0]
+    source_base = base + "/sources/" + source["id"]
+    assert client.post(source_base + "/prepare-audio").status_code == 409
+    post(client, base + "/process", {"min_seconds": 0.45})
+    assert wait_for_sources(client, base)[0]["status"] == "done"
+
+    info = post(client, source_base + "/prepare-audio", {})
+    assert info["duration"] > 8 and info["offset"] == 0
+    ranged = client.get(source_base + "/original-audio", headers={"Range": "bytes=0-31"})
+    assert ranged.status_code == 206 and ranged.content.startswith(b"fLaC")
+    source_samples, rate = sf.read(io.BytesIO(client.get(source_base + "/original-audio").content), dtype="int16")
+    assert rate == 48000
+
+    clips = client.get(base + "/clips").json()["clips"]
+    first, second = clips[:2]
+    assert first["end"] < second["start"]
+    merged = post(client, base + "/clips/merge", {"clip_ids": [second["id"], first["id"]]})
+    assert (merged["start"], merged["end"]) == (first["start"], second["end"])
+    assert merged["review"] == "pending" and merged["quality"]["edit"] == "merge"
+
+    def clip_audio(clip):
+        return client.get(base + "/clips/" + clip["id"] + "/audio").content
+
+    with wave.open(io.BytesIO(clip_audio(merged))) as wav:
+        begin, end = (round(merged[key] * rate) for key in ("start", "end"))
+        assert wav.readframes(wav.getnframes()) == source_samples[begin:end].astype("<i2").tobytes()
+    assert post(client, base + "/clips/merge", {"clip_ids": [first["id"], second["id"]]})["id"] == merged["id"]
+
+    trimmed = post(client, source_base + "/clips", {"start": 0.25, "end": 0.65})
+    assert trimmed["duration"] == 0.4 and trimmed["quality"]["edit"] == "cut"
+    with wave.open(io.BytesIO(clip_audio(trimmed))) as wav:
+        assert wav.readframes(wav.getnframes()) == source_samples[12000:31200].astype("<i2").tobytes()
+    assert client.post(source_base + "/clips", json={"start": 0, "end": info["duration"] + 0.2}).status_code == 400
+    assert client.get(base).json()["review"]["pending"]["count"] == len(clips) + 2
+    assert clip_audio(first).startswith(b"RIFF") and clip_audio(second).startswith(b"RIFF")
 
 
 def test_failed_download_retry_and_silence(client, speech, monkeypatch):

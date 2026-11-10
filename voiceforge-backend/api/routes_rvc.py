@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from processing.rvc_audio import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS, MediaError, probe
+from processing.rvc_edit import create_edit, source_audio_info, source_audio_path
 from processing.rvc_export import export_dataset
 from rvc_projects import (
     RvcClip, RvcProject, RvcSource, clip_data, clip_path, export_root, project_data, source_data,
@@ -94,6 +95,15 @@ class ReviewInput(BaseModel):
     review: Literal["kept", "excluded", "pending"]
 
 
+class ClipRange(BaseModel):
+    start: float = Field(ge=0, allow_inf_nan=False)
+    end: float = Field(gt=0, allow_inf_nan=False)
+
+
+class MergeInput(BaseModel):
+    clip_ids: list[Identifier] = Field(min_length=2, max_length=1000)
+
+
 class ExportInput(BaseModel):
     sample_rate: SampleRate = 40000
     clip_ids: list[Identifier] | None = Field(None, min_length=1, max_length=1000)
@@ -110,6 +120,13 @@ def get_source(db: Session, project_id: str, source_id: str) -> RvcSource:
     source = db.get(RvcSource, source_id)
     if source is None or source.project_id != project_id:
         raise HTTPException(404, "素材不存在。")
+    return source
+
+
+def get_editable_source(db: Session, project_id: str, source_id: str) -> RvcSource:
+    source = get_source(db, project_id, source_id)
+    if source.status != "done":
+        raise HTTPException(409, "请先处理这项素材，再编辑原音轨。")
     return source
 
 
@@ -312,6 +329,49 @@ def cancel_source(project_id: Identifier, source_id: Identifier, db: DB):
         raise HTTPException(409, "该素材当前无法取消。")
     db.commit()
     return {"status": status}
+
+
+@router.post("/projects/{project_id}/sources/{source_id}/prepare-audio")
+def prepare_audio(project_id: Identifier, source_id: Identifier, db: DB):
+    source = get_editable_source(db, project_id, source_id)
+    try:
+        return source_audio_info(source)
+    except MediaError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/projects/{project_id}/sources/{source_id}/original-audio")
+def original_audio(project_id: Identifier, source_id: Identifier, db: DB):
+    get_editable_source(db, project_id, source_id)
+    path = source_audio_path(project_id, source_id)
+    if not path.is_file():
+        raise HTTPException(404, "请先载入原音轨。")
+    return FileResponse(path, media_type="audio/flac")
+
+
+@router.post("/projects/{project_id}/sources/{source_id}/clips")
+def cut_clip(project_id: Identifier, source_id: Identifier, data: ClipRange, db: DB):
+    source = get_editable_source(db, project_id, source_id)
+    try:
+        return create_edit(db, source, data.start, data.end, "cut")
+    except MediaError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/projects/{project_id}/clips/merge")
+def merge_clips(project_id: Identifier, data: MergeInput, db: DB):
+    ids = set(data.clip_ids)
+    clips = db.scalars(select(RvcClip).where(RvcClip.project_id == project_id, RvcClip.id.in_(ids))).all()
+    if len(clips) != len(ids) or len(clips) < 2:
+        raise HTTPException(400, "请选择当前项目中的至少两个片段。")
+    source_ids = {clip.source_id for clip in clips}
+    if len(source_ids) != 1:
+        raise HTTPException(400, "请选择同一项素材里的片段。")
+    source = get_editable_source(db, project_id, clips[0].source_id)
+    try:
+        return create_edit(db, source, min(clip.start for clip in clips), max(clip.end for clip in clips), "merge")
+    except MediaError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @router.get("/projects/{project_id}/clips")

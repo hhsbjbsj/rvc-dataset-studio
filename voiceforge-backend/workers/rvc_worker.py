@@ -16,6 +16,7 @@ from processing.rvc_audio import (
     MediaError, ProcessingCancelled, VAD_RATE, WORK_RATE,
     check_space, extract_pcm, make_clips, probe,
 )
+from processing.rvc_edit import cache_decoded_audio, source_audio_path
 from rvc_projects import RvcClip, RvcSource, new_id, source_data, work_dir
 from sources.rvc_online import download
 
@@ -68,7 +69,8 @@ class RvcWorker:
         last_progress = -1
         generation = new_id()
         destination = root / generation
-        committed = False
+        cached_audio = source_audio_path(project_id, source_id)
+        cached = committed = False
 
         def check():
             nonlocal last_check
@@ -118,7 +120,7 @@ class RvcWorker:
                 split = options["split"]
                 if not split and duration > 120:
                     raise MediaError("跳过切分时，单文件最长为 120 秒。请为长素材开启切分。")
-                check_space(root, int(duration * (WORK_RATE * 4 + (VAD_RATE * 2 if split else 0))))
+                check_space(root, int(duration * (WORK_RATE * 6 + (VAD_RATE * 2 if split else 0))))
                 audio = scratch / "decoded.pcm"
                 vad = scratch / "vad.pcm" if split else None
                 progress("extract", 50)
@@ -128,6 +130,10 @@ class RvcWorker:
                 generated.mkdir()
                 clips = make_clips(audio, vad, generated, options, track["offset"], check)
                 progress("quality", 90)
+                prepared = scratch / cached_audio.name
+                cache_decoded_audio(audio, prepared, check)
+                os.replace(prepared, cached_audio)
+                cached = True
                 os.replace(generated, destination)
                 with SessionLocal.begin() as db:
                     if not update_source(
@@ -147,6 +153,8 @@ class RvcWorker:
                     db.get(RvcSource, source_id).duplicate_clips = duplicates
                 committed = True
         except ProcessingCancelled:
+            if cached:
+                cached_audio.unlink(missing_ok=True)
             self.remove_directory(root, destination)
             with SessionLocal.begin() as db:
                 update_source(db, source_id, ("cancelling",), status="cancelled", stage="", progress=0)
@@ -154,6 +162,8 @@ class RvcWorker:
             if committed:
                 logger.exception("RVC source %s committed, but scratch cleanup failed", source_id)
                 return
+            if cached:
+                cached_audio.unlink(missing_ok=True)
             self.remove_directory(root, destination)
             logger.exception("RVC source %s failed", source_id)
             with SessionLocal.begin() as db:

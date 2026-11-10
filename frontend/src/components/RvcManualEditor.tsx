@@ -1,0 +1,122 @@
+import { useRef, useState } from 'react'
+import type { RunAction } from '@/components/RvcSources'
+import { api } from '@/lib/api'
+import { API_URL } from '@/lib/config'
+
+type AudioInfo = { duration: number; offset: number }
+type Props = {
+  base: string
+  sources: { id: string; title: string }[]
+  busy: boolean
+  run: RunAction
+  onSave: (sourceId: string, start: number, end: number) => void
+}
+
+export function RvcManualEditor({ base, sources, busy, run, onSave }: Props) {
+  const [sourceId, setSourceId] = useState('')
+  const [audioInfo, setAudioInfo] = useState<AudioInfo>()
+  const [start, setStart] = useState('')
+  const [end, setEnd] = useState('')
+  const [position, setPosition] = useState(0)
+  const [playbackError, setPlaybackError] = useState('')
+  const player = useRef<HTMLAudioElement>(null)
+  const previewEnd = useRef<number | null>(null)
+
+  const activeId = sourceId || sources[0]?.id
+  const sourceUrl = base + '/sources/' + activeId
+  const offset = audioInfo?.offset ?? 0
+  const limit = offset + (audioInfo?.duration ?? 0)
+  const first = Number(start)
+  const last = Number(end)
+  const validRange = !!audioInfo && !!start && !!end && first >= offset && last <= limit
+    && last > first && last - first <= 120
+
+  function loadAudio() {
+    run('载入原音轨', async () => {
+      const { data } = await api.post<AudioInfo>(sourceUrl + '/prepare-audio')
+      setAudioInfo(data)
+      setPosition(data.offset)
+      setStart(String(data.offset))
+      setEnd('')
+      setPlaybackError('')
+    })
+  }
+
+  function mark(setTime: (value: string) => void) {
+    const audio = player.current
+    if (!audio) return
+    setTime(String(Math.max(offset, Math.min(limit, Number((audio.currentTime + offset).toFixed(3))))))
+  }
+
+  function preview() {
+    const audio = player.current
+    if (!audio || !validRange) return
+    setPlaybackError('')
+    audio.currentTime = first - offset
+    previewEnd.current = last - offset
+    void audio.play().catch(() => {
+      previewEnd.current = null
+      setPlaybackError('暂时无法播放，请检查原音轨是否已载入。')
+    })
+  }
+
+  return (
+    <details className="hairline-b space-y-3 pb-4" onToggle={e => { if (!e.currentTarget.open) player.current?.pause() }}>
+      <summary className="cursor-pointer font-medium text-hi">手工截取原音轨</summary>
+      <p className="text-sm text-lo">播放原音轨，听到想要的位置时标记起点和终点，也可直接输入原素材时间（秒）。</p>
+      <div className="flex flex-wrap items-end gap-2">
+        <label className="min-w-0 text-sm text-mid">素材
+          <select className="input-field mt-1 block max-w-full" value={activeId ?? ''} disabled={busy || !sources.length}
+            onChange={e => {
+              setSourceId(e.target.value)
+              setAudioInfo(undefined)
+              setPlaybackError('')
+              previewEnd.current = null
+            }}>
+            {!sources.length && <option value="">暂无已完成的素材</option>}
+            {sources.map(source => <option key={source.id} value={source.id}>{source.title}</option>)}
+          </select>
+        </label>
+        <button className="btn btn-secondary btn-sm" disabled={busy || !activeId || !!audioInfo} onClick={loadAudio}>载入原音轨</button>
+      </div>
+      {audioInfo && (
+        <div className="space-y-3">
+          <audio ref={player} className="w-full" aria-label="原音轨" controls preload="metadata"
+            src={API_URL + sourceUrl + '/original-audio'}
+            onError={() => {
+              setAudioInfo(undefined)
+              setPlaybackError('原音轨加载失败，请重新载入。')
+            }}
+            onPause={() => { previewEnd.current = null }}
+            onTimeUpdate={event => {
+              const audio = event.currentTarget
+              const endTime = previewEnd.current
+              if (endTime !== null && audio.currentTime >= endTime) {
+                previewEnd.current = null
+                audio.pause()
+                audio.currentTime = endTime
+              }
+              setPosition(audio.currentTime + offset)
+            }} />
+          <p className="text-xs text-lo">原素材位置 {position.toFixed(3)} 秒 · 可选范围 {offset.toFixed(3)} 至 {limit.toFixed(3)} 秒</p>
+          <div className="flex flex-wrap items-end gap-2">
+            <label className="text-sm text-mid">起点（秒）
+              <input className="input-field mt-1 block w-28" type="number" step="any" min={offset} max={limit}
+                value={start} disabled={busy} onChange={e => setStart(e.target.value)} />
+            </label>
+            <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => mark(setStart)}>标记起点</button>
+            <label className="text-sm text-mid">终点（秒）
+              <input className="input-field mt-1 block w-28" type="number" step="any" min={offset} max={limit}
+                value={end} disabled={busy} onChange={e => setEnd(e.target.value)} />
+            </label>
+            <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => mark(setEnd)}>标记终点</button>
+            <button className="btn btn-secondary btn-sm" disabled={busy || !validRange} onClick={preview}>试听截取范围</button>
+            <button className="btn btn-primary btn-sm" disabled={busy || !validRange} onClick={() => { if (activeId) onSave(activeId, first, last) }}>保存截取片段</button>
+          </div>
+          <p className="text-xs text-lo">每个片段最长 120 秒。保存后可直接试听生成的 WAV。</p>
+        </div>
+      )}
+      {playbackError && <p role="alert" className="text-sm text-mid">{playbackError}</p>}
+    </details>
+  )
+}

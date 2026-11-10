@@ -234,35 +234,41 @@ def make_clips(audio: Path, vad: Path | None, directory: Path, options: dict, of
                 continue
             pcm.seek(start * 2)
             raw = pcm.read((end - start) * 2)
-            samples = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768
-            peak = float(np.max(np.abs(samples)))
-            if peak < 0.003 or np.count_nonzero(np.abs(samples) >= 0.003) < WORK_RATE * 0.05:
-                continue
-            loudness = rms_db(samples)
-            clipping = float(np.mean(np.abs(samples) >= 0.999))
-            quiet = float(np.mean(np.abs(samples) < 0.01))
-            snr = estimate_snr(samples, WORK_RATE)
-            score = round(max(0, min(100, 50 + snr - 400 * clipping - 40 * quiet)), 1)
-            if options["normalize"]:
-                gain = min(2.0, 0.9 / peak)
-                adjusted = (samples * gain * 32768).astype("<i2").tobytes()
-            else:
-                adjusted = raw
             filename = f"{len(clips) + 1:06d}.wav"
-            with wave.open(str(directory / filename), "wb") as wav:
-                wav.setparams((1, 2, WORK_RATE, 0, "NONE", "not compressed"))
-                wav.writeframes(adjusted)
-            clips.append({
-                "filename": filename,
-                "digest": hashlib.sha256(raw).hexdigest(),
-                "start": round(offset + start / WORK_RATE, 6),
-                "end": round(offset + end / WORK_RATE, 6),
-                "duration": round(len(samples) / WORK_RATE, 6),
-                "quality": {
-                    "score": score, "snr_db": round(snr, 2), "rms_db": round(loudness, 2),
-                    "clip_ratio": round(clipping, 6), "quiet_ratio": round(quiet, 6),
-                },
-            })
+            clip = write_clip(raw, directory / filename, offset, start, options["normalize"])
+            if clip is not None:
+                clips.append(clip)
     if not clips:
         raise MediaError("没有可用片段。请检查是否有语音，或调整最短片段时长。")
     return clips
+
+
+def write_clip(raw: bytes, path: Path, offset: float, start: int, normalize: bool, *, manual: bool = False) -> dict | None:
+    samples = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768
+    peak = float(np.max(np.abs(samples)))
+    if not manual and (peak < 0.003 or np.count_nonzero(np.abs(samples) >= 0.003) < WORK_RATE * 0.05):
+        return None
+    loudness = rms_db(samples)
+    clipping = float(np.mean(np.abs(samples) >= 0.999))
+    quiet = float(np.mean(np.abs(samples) < 0.01))
+    snr = estimate_snr(samples, WORK_RATE)
+    score = round(max(0, min(100, 50 + snr - 400 * clipping - 40 * quiet)), 1)
+    if normalize and peak:
+        gain = min(2.0, 0.9 / peak)
+        raw_output = (samples * gain * 32768).astype("<i2").tobytes()
+    else:
+        raw_output = raw
+    with wave.open(str(path), "wb") as wav:
+        wav.setparams((1, 2, WORK_RATE, 0, "NONE", "not compressed"))
+        wav.writeframes(raw_output)
+    return {
+        "filename": path.name,
+        "digest": hashlib.sha256(raw).hexdigest(),
+        "start": round(offset + start / WORK_RATE, 6),
+        "end": round(offset + (start + len(samples)) / WORK_RATE, 6),
+        "duration": round(len(samples) / WORK_RATE, 6),
+        "quality": {
+            "score": score, "snr_db": round(snr, 2), "rms_db": round(loudness, 2),
+            "clip_ratio": round(clipping, 6), "quiet_ratio": round(quiet, 6),
+        },
+    }

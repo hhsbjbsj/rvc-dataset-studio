@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { isAxiosError } from 'axios'
+import { RvcManualEditor } from '@/components/RvcManualEditor'
 import { RvcSources, type Project, type RunAction } from '@/components/RvcSources'
 import { api } from '@/lib/api'
 import { API_URL } from '@/lib/config'
@@ -14,7 +15,7 @@ type Source = {
 type Review = 'pending' | 'kept' | 'excluded'
 type Clip = {
   id: string; source_title: string; origin: string; start: number; end: number; duration: number
-  review: Review; quality: { score: number; rms_db: number; snr_db: number; clip_ratio: number }
+  review: Review; quality: { score: number; rms_db: number; snr_db: number; clip_ratio: number; edit?: 'cut' | 'merge' }
 }
 type ProjectDetails = Project & { sources: Source[]; review: Partial<Record<Review, { count: number; seconds: number }>> }
 type ExportResult = { directory: string; count: number; duration_seconds: number; download_url: string }
@@ -58,6 +59,7 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
   const [selected, setSelected] = useState<string[]>([])
   const [sampleRate, setSampleRate] = useState(40000)
   const [exports, setExports] = useState<ExportBatch[]>([])
+  const [manualClip, setManualClip] = useState<Clip>()
   const details = useQuery({
     queryKey: ['rvc-project', id],
     queryFn: async () => (await api.get<ProjectDetails>(base)).data,
@@ -89,6 +91,15 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
       setSelected(previous => previous.filter(clipId => !ids.includes(clipId)))
       refresh()
       await clipPage.refetch()
+    })
+  }
+
+  function saveManualClip(path: string, payload: { start: number; end: number } | { clip_ids: string[] }) {
+    run('生成手工片段', async () => {
+      const { data } = await api.post<Clip>(base + path, payload)
+      setManualClip(data)
+      refresh()
+      await queryClient.invalidateQueries({ queryKey: ['rvc-clips', id] })
     })
   }
 
@@ -175,6 +186,16 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
           待审核 {details.data?.review.pending?.count ?? 0} 段 · 已保留 {details.data?.review.kept?.count ?? 0} 段
           {' · '}合格时长 {timestamp(details.data?.review.kept?.seconds ?? 0)} / {project.target_minutes} 分钟
         </p>
+        <RvcManualEditor base={base} sources={sources.filter(source => source.status === 'done')} busy={busy} run={run}
+          onSave={(sourceId, start, end) => saveManualClip('/sources/' + sourceId + '/clips', { start, end })} />
+        {manualClip && (
+          <div className="hairline-b space-y-2 pb-4" aria-label="手工片段结果">
+            <p className="text-sm text-hi">手工片段已就绪 · {timestamp(manualClip.start)}–{timestamp(manualClip.end)}</p>
+            <audio className="h-9 max-w-full" controls preload="none" aria-label="试听手工片段"
+              src={API_URL + base + '/clips/' + manualClip.id + '/audio'} />
+            <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => setSelected([manualClip.id])}>只勾选这个手工片段</button>
+          </div>
+        )}
         {clipPage.isError && <p role="alert" className="text-sm text-lo">{message(clipPage.error)}</p>}
         {!clipPage.data?.clips.length && <p className="text-sm text-lo">处理完成后，片段会出现在这里。</p>}
         {!!(clipPage.data?.clips.length || selected.length) && (
@@ -187,7 +208,10 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
             <button className="btn btn-secondary btn-sm" disabled={busy || !selected.length} onClick={() => setSelected([])}>清除选择</button>
             <button className="btn btn-secondary btn-sm" disabled={busy || !hasSelection} onClick={() => review(selected, 'kept')}>保留所选</button>
             <button className="btn btn-danger btn-sm" disabled={busy || !hasSelection} onClick={() => review(selected, 'excluded')}>剔除所选</button>
+            <button className="btn btn-secondary btn-sm" disabled={busy || !hasSelection || selected.length < 2}
+              onClick={() => saveManualClip('/clips/merge', { clip_ids: selected })}>合并所选片段</button>
             <span className="text-sm text-mid" aria-live="polite">已勾选 {selected.length} 段</span>
+            {selected.length >= 2 && <p className="w-full text-xs text-lo">同一素材中的片段可合并。新片段会包含最早起点到最晚终点之间的原音。</p>}
           </div>
         )}
         {!!(clipPage.data?.total || selected.length || exports.length) && (
@@ -224,7 +248,7 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
               <div className="min-w-52 flex-1">
                 <p className="break-all text-sm text-hi">{clip.source_title} · {timestamp(clip.start)}–{timestamp(clip.end)}</p>
                 <p className="break-all text-xs text-lo">{clip.origin}</p>
-                <p className="text-xs text-mid">{REVIEW[clip.review]} · {clip.duration.toFixed(2)} 秒 · 质量 {clip.quality.score}/100 · SNR {clip.quality.snr_db} dB</p>
+                <p className="text-xs text-mid">{REVIEW[clip.review]}{clip.quality.edit && (clip.quality.edit === 'merge' ? ' · 手工合并' : ' · 手工截取')} · {clip.duration.toFixed(2)} 秒 · 质量 {clip.quality.score}/100 · SNR {clip.quality.snr_db} dB</p>
               </div>
               <audio className="h-9 max-w-full" controls preload="none" aria-label={'试听 ' + clip.source_title + ' ' + timestamp(clip.start)}
                 src={API_URL + base + '/clips/' + clip.id + '/audio'} />
