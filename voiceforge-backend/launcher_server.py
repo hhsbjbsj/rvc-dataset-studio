@@ -1,5 +1,6 @@
 """Start one launcher-managed workbench for this installation on a loopback port."""
 
+import asyncio
 import errno
 import json
 import msvcrt
@@ -10,6 +11,21 @@ import sys
 from pathlib import Path
 
 import uvicorn
+
+
+async def serve(listener: socket.socket, stop_request: Path) -> None:
+    server = uvicorn.Server(uvicorn.Config("main:app", access_log=False, workers=1))
+
+    async def watch_for_stop() -> None:
+        while not stop_request.exists():
+            await asyncio.sleep(0.2)
+        server.should_exit = True
+
+    watcher = asyncio.create_task(watch_for_stop())
+    try:
+        await server.serve(sockets=[listener])
+    finally:
+        watcher.cancel()
 
 
 def main(preferred_port: int) -> int:
@@ -36,15 +52,17 @@ def main(preferred_port: int) -> int:
 
             port = listener.getsockname()[1]
             instance = secrets.token_hex(16)
+            stop_request = runtime / f"stop-{instance}.request"
             os.environ["RVC_SERVE_FRONTEND"] = "true"
             os.environ["RVC_LAUNCHER_INSTANCE"] = instance
             pending = endpoint.with_suffix(".tmp")
-            pending.write_text(json.dumps({"port": port, "instance": instance}), encoding="utf-8")
+            pending.write_text(json.dumps({"port": port, "instance": instance, "stopSupported": True}), encoding="utf-8")
             pending.replace(endpoint)
             print(f"Workbench address: http://127.0.0.1:{port}/rvc", flush=True)
             try:
-                uvicorn.Server(uvicorn.Config("main:app", access_log=False, workers=1)).run(sockets=[listener])
+                asyncio.run(serve(listener, stop_request))
             finally:
+                stop_request.unlink(missing_ok=True)
                 endpoint.unlink(missing_ok=True)
     return 0
 

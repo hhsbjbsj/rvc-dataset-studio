@@ -24,7 +24,7 @@ public partial class MainWindow : Window
     private readonly string wallpaperPath;
     private readonly Workbench workbench;
     private LauncherSettings settings;
-    private Uri? page;
+    private WorkbenchPage? page;
     private bool busy;
     private bool probing;
     private string serviceMessage = "checkingService";
@@ -76,6 +76,7 @@ public partial class MainWindow : Window
         SaveSettingsButton.Content = T("save");
         UpdateButton.Content = T("checkUpdates");
         ReleaseButton.Content = T("viewUpdate");
+        StopButton.Content = T("stopStudio");
         RenderService();
         RenderUpdate();
     }
@@ -101,8 +102,11 @@ public partial class MainWindow : Window
         ServiceStatus.ToolTip = ServiceStatus.Text;
         ServiceDot.Fill = page is not null ? Brushes.LightGreen : busy ? Brushes.LightSkyBlue : Brushes.LightSlateGray;
         ServiceProgress.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
-        LaunchButton.IsEnabled = !busy && workbench.HasProject;
+        bool stopping = workbench.IsStopping;
+        LaunchButton.IsEnabled = !busy && !stopping && workbench.HasProject;
         LaunchButton.Content = T(page is not null ? "openStudio" : workbench.NeedsSetup ? "initialize" : "launch");
+        StopButton.Visibility = page?.StopInstance is not null ? Visibility.Visible : Visibility.Collapsed;
+        StopButton.IsEnabled = !busy && !stopping;
     }
 
     private async Task ProbeAsync()
@@ -111,13 +115,18 @@ public partial class MainWindow : Window
         probing = true;
         try
         {
-            Uri? available = await workbench.FindPageAsync(shutdown.Token);
-            if (busy || shutdown.IsCancellationRequested) return;
+            WorkbenchPage? before = page;
+            WorkbenchPage? available = await workbench.FindPageAsync(shutdown.Token);
+            if (busy || before != page || shutdown.IsCancellationRequested) return;
             bool changed = page != available;
             page = available;
-            if (changed || serviceMessage == "checkingService")
+            if (workbench.IsStopping)
+                SetServiceMessage("stopStudioPending");
+            else if (page is null && serviceMessage == "stopStudioPending")
+                SetServiceMessage("stoppedStudio");
+            else if (changed || serviceMessage == "checkingService")
             {
-                if (page is not null) SetServiceMessage("ready", page.Authority);
+                if (page is not null) SetServiceMessage("ready", page.Address.Authority);
                 else SetServiceMessage(IdleMessage());
             }
         }
@@ -159,9 +168,9 @@ public partial class MainWindow : Window
                 SetServiceMessage("startFailed");
                 return;
             }
-            SetServiceMessage("ready", page.Authority);
-            try { Open(page.AbsoluteUri); }
-            catch (Win32Exception) { SetServiceMessage("browserFailed", page.AbsoluteUri); }
+            SetServiceMessage("ready", page.Address.Authority);
+            try { Open(page.Address.AbsoluteUri); }
+            catch (Win32Exception) { SetServiceMessage("browserFailed", page.Address.AbsoluteUri); }
         }
         catch (Exception exception) when (exception is Win32Exception or IOException or UnauthorizedAccessException or InvalidOperationException)
         {
@@ -171,6 +180,36 @@ public partial class MainWindow : Window
         {
             busy = false;
             RenderService();
+        }
+    }
+
+    private async void StopWorkbench(object sender, RoutedEventArgs e)
+    {
+        if (busy || page is not { StopInstance: not null } running) return;
+        if (MessageBox.Show(this, T("stopConfirm"), Title, MessageBoxButton.YesNo,
+                MessageBoxImage.Question, MessageBoxResult.No) != MessageBoxResult.Yes) return;
+
+        busy = true;
+        SetServiceMessage("stoppingStudio");
+        RenderUpdate();
+        try
+        {
+            bool stopped = await workbench.StopAsync(running, shutdown.Token);
+            page = await workbench.FindPageAsync(shutdown.Token);
+            if (workbench.IsStopping) SetServiceMessage("stopStudioPending");
+            else if (page is null) SetServiceMessage("stoppedStudio");
+            else if (stopped || page != running) SetServiceMessage("ready", page.Address.Authority);
+            else SetServiceMessage("stopStudioPending");
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or OperationCanceledException)
+        {
+            SetServiceMessage("stopStudioFailed");
+        }
+        finally
+        {
+            busy = false;
+            RenderService();
+            RenderUpdate();
         }
     }
 

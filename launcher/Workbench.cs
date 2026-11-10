@@ -5,11 +5,14 @@ using System.Text.Json;
 
 namespace RvcLauncher;
 
+internal sealed record WorkbenchPage(Uri Address, string? StopInstance = null);
+
 internal sealed class Workbench(string root, string dataDirectory)
 {
     private const int PreferredPort = 5173;
     private const int AlreadyRunningExitCode = 3;
     private readonly string backend = Path.Combine(root, "voiceforge-backend");
+    private readonly string endpointPath = Path.Combine(dataDirectory, "workbench-endpoint.json");
     private readonly object logLock = new();
     private Process? service;
 
@@ -24,6 +27,8 @@ internal sealed class Workbench(string root, string dataDirectory)
         || !File.Exists(Path.Combine(root, "frontend", "dist", "index.html"))
         || File.Exists(Path.Combine(dataDirectory, "needs-setup"));
     public bool OwnsService => service is { HasExited: false };
+    public bool IsStopping => ReadEndpoint() is { StopSupported: true, Instance: { } instance } &&
+        IsInstanceId(instance) && File.Exists(StopRequestPath(instance)) && IsServerLocked();
 
     public static string FindRoot()
     {
@@ -34,28 +39,68 @@ internal sealed class Workbench(string root, string dataDirectory)
         return AppContext.BaseDirectory;
     }
 
-    public async Task<Uri?> FindPageAsync(CancellationToken cancellationToken)
+    public async Task<WorkbenchPage?> FindPageAsync(CancellationToken cancellationToken)
     {
         if (!HasProject) return null;
-        return await FindManagedPageAsync(cancellationToken)
-            ?? await CheckPageAsync(PreferredPort, null, cancellationToken);
+        if (await FindManagedPageAsync(cancellationToken) is { } managed) return managed;
+        var legacy = await CheckPageAsync(PreferredPort, null, cancellationToken);
+        return legacy is null ? null : new(legacy);
     }
 
-    private async Task<Uri?> FindManagedPageAsync(CancellationToken cancellationToken)
+    private Endpoint? ReadEndpoint()
     {
-        Endpoint? endpoint;
         try
         {
-            string path = Path.Combine(dataDirectory, "workbench-endpoint.json");
-            using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
-            endpoint = JsonSerializer.Deserialize<Endpoint>(stream, JsonSerializerOptions.Web);
+            using var stream = File.Open(endpointPath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+            return JsonSerializer.Deserialize<Endpoint>(stream, JsonSerializerOptions.Web);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException)
         {
             return null;
         }
-        return endpoint is { Port: > 0 and <= 65535, Instance.Length: 32 }
-            ? await CheckPageAsync(endpoint.Port, endpoint.Instance, cancellationToken) : null;
+    }
+
+    private async Task<WorkbenchPage?> FindManagedPageAsync(CancellationToken cancellationToken)
+    {
+        if (ReadEndpoint() is not { Port: > 0 and <= 65535, Instance.Length: 32 } endpoint) return null;
+        var address = await CheckPageAsync(endpoint.Port, endpoint.Instance, cancellationToken);
+        return address is null ? null : new(address, endpoint.StopSupported ? endpoint.Instance : null);
+    }
+
+    public async Task<bool> StopAsync(WorkbenchPage page, CancellationToken cancellationToken)
+    {
+        if (page.StopInstance is not { } instance || !IsInstanceId(instance)) return false;
+        if (ReadEndpoint() is not { StopSupported: true } endpoint || endpoint.Instance != instance || endpoint.Port != page.Address.Port)
+            return false;
+
+        // The request applies only to this installation and this generation of the server.
+        File.WriteAllText(StopRequestPath(instance), "");
+        var elapsed = Stopwatch.StartNew();
+        while (elapsed.Elapsed < TimeSpan.FromSeconds(25))
+        {
+            if (!IsServerLocked() || (ReadEndpoint() is { } current && current.Instance != instance)) return true;
+            await Task.Delay(200, cancellationToken);
+        }
+        return false;
+    }
+
+    private string StopRequestPath(string instance) => Path.Combine(dataDirectory, $"stop-{instance}.request");
+
+    private static bool IsInstanceId(string instance) => instance.Length == 32 &&
+        instance.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    private bool IsServerLocked()
+    {
+        try
+        {
+            using var file = File.Open(Path.Combine(dataDirectory, "workbench.lock"), FileMode.Open,
+                FileAccess.ReadWrite, FileShare.ReadWrite);
+            file.Lock(0, 1);
+            return false;
+        }
+        catch (FileNotFoundException) { return false; }
+        catch (IOException) { return true; }
+        catch (UnauthorizedAccessException) { return true; }
     }
 
     private static async Task<Uri?> CheckPageAsync(int port, string? instance, CancellationToken cancellationToken)
@@ -80,7 +125,7 @@ internal sealed class Workbench(string root, string dataDirectory)
         }
     }
 
-    public async Task<Uri?> StartAsync(CancellationToken cancellationToken)
+    public async Task<WorkbenchPage?> StartAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         bool startedHere = !OwnsService;
@@ -113,7 +158,7 @@ internal sealed class Workbench(string root, string dataDirectory)
         return null;
     }
 
-    private sealed record Endpoint(int Port, string? Instance);
+    private sealed record Endpoint(int Port, string? Instance, bool StopSupported);
 
     public async Task<bool> SetupAsync(CancellationToken cancellationToken)
     {

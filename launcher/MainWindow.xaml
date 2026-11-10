@@ -189,6 +189,8 @@
                             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
                                 <Button x:Name="ReleaseButton" Style="{StaticResource Action}" Click="ShowUpdate" Visibility="Collapsed" Margin="0,0,8,0" />
                                 <Button x:Name="UpdateButton" Style="{StaticResource Action}" Click="CheckUpdates" Margin="0,0,10,0" />
+                                <Button x:Name="StopButton" Style="{StaticResource Action}" Click="StopWorkbench"
+                                        Visibility="Collapsed" Margin="0,0,10,0" />
                                 <Button x:Name="LaunchButton" Style="{StaticResource Action}" Click="Launch"
                                         MinWidth="166" Height="51" FontSize="15" Background="#B5C8FF" Foreground="#10182C" />
                             </StackPanel>
