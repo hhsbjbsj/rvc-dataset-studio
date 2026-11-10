@@ -128,6 +128,31 @@ def test_bilibili_search_and_url_validation(client, monkeypatch):
     assert client.post("/api/rvc/projects", json={}, headers={"origin": "https://example.com"}).status_code == 403
 
 
+def test_bilibili_short_link_import_preserves_part_and_checks_target(client, monkeypatch):
+    short = "https://b23.tv/AbCd123"
+    other = "https://b23.tv/Redirect"
+    destinations = {short: VIDEO + "?p=2&share_source=test", other: "http://127.0.0.1/video/"}
+    requested = []
+
+    def redirect(url, *, follow_redirects, timeout):
+        assert not follow_redirects and timeout > 0
+        requested.append(url)
+        return httpx.Response(302, headers={"Location": destinations[url]})
+
+    monkeypatch.setattr("sources.rvc_online.httpx.get", redirect)
+    base = new_project(client)
+    result = post(client, base + "/sources/online", {"videos": [
+        {"url": short, "title": "B 站分 P"},
+        {"url": VIDEO + "?p=2"},
+        {"url": other},
+    ]})
+    assert result["added"] == 1
+    assert result["duplicates"] == 1
+    assert [error["origin"] for error in result["errors"]] == [other]
+    assert requested == [short, other]
+    assert client.get(base).json()["sources"][0]["origin"] == VIDEO + "?p=2"
+
+
 def test_windows_mixed_media_review_and_export(client, speech, monkeypatch):
     folder, long_wav, lines = speech
     video_folder = folder / "视频"

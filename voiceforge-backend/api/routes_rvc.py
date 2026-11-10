@@ -20,7 +20,7 @@ from processing.rvc_export import export_dataset
 from rvc_projects import (
     RvcClip, RvcProject, RvcSource, clip_data, clip_path, export_root, project_data, source_data,
 )
-from sources.rvc_online import normalize_url, search_bilibili_page
+from sources.rvc_online import resolve_source_url, search_bilibili_page
 from workers.rvc_worker import update_source
 
 LOOPBACK = {"127.0.0.1", "::1", "localhost"}
@@ -262,7 +262,7 @@ def import_online(project_id: Identifier, data: OnlineImport, db: DB):
     added = 0
     for video in data.videos:
         try:
-            platform, url = normalize_url(video.url)
+            platform, url = resolve_source_url(video.url)
         except ValueError as exc:
             errors.append({"origin": video.url, "error": str(exc)})
             continue

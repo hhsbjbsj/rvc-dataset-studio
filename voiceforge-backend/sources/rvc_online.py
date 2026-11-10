@@ -12,6 +12,7 @@ from processing.rvc_audio import MediaError, ProcessingCancelled
 
 BILI_VIDEO = re.compile(r"/video/(BV[A-Za-z0-9]{10}|av[0-9]+)(?:/)?")
 YOUTUBE_ID = re.compile(r"[A-Za-z0-9_-]{11}")
+BILI_SHORT_PATH = re.compile(r"/[A-Za-z0-9_-]+/?")
 
 
 def normalize_url(url: str) -> tuple[str, str]:
@@ -36,6 +37,35 @@ def normalize_url(url: str) -> tuple[str, str]:
         if YOUTUBE_ID.fullmatch(video):
             return "youtube", f"https://www.youtube.com/watch?v={video}"
     raise ValueError("支持 B 站 BV/av 视频链接和 YouTube 单视频链接。")
+
+
+def resolve_source_url(url: str) -> tuple[str, str]:
+    parts = urlsplit(url.strip())
+    if parts.hostname != "b23.tv":
+        return normalize_url(url)
+
+    if (
+        parts.scheme not in {"http", "https"}
+        or parts.username is not None or parts.password is not None or parts.port is not None
+        or not BILI_SHORT_PATH.fullmatch(parts.path)
+    ):
+        raise ValueError("B 站短链接格式无效。")
+
+    try:
+        response = httpx.get(f"https://b23.tv{parts.path}", follow_redirects=False, timeout=8)
+    except httpx.HTTPError as exc:
+        raise ValueError("B 站短链接解析失败，请重试或粘贴 BV/av 视频链接。") from exc
+
+    # Accept a direct Bilibili video redirect without following arbitrary targets.
+    if not response.has_redirect_location:
+        raise ValueError("B 站短链接未返回有效的视频地址。")
+    try:
+        platform, canonical = normalize_url(response.headers["location"])
+    except ValueError as exc:
+        raise ValueError("该 B 站短链接未指向 BV/av 视频。") from exc
+    if platform != "bilibili":
+        raise ValueError("该 B 站短链接未指向 BV/av 视频。")
+    return platform, canonical
 
 
 def duration_seconds(value: str) -> int:

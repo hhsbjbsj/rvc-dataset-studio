@@ -135,7 +135,7 @@ export function RvcSources({
             e.preventDefault()
             run('添加在线链接', () => addOnline(urls.split(/\r?\n/).map(url => url.trim()).filter(Boolean).map(url => ({ url }))))
           }}>
-            <label className="block text-sm text-mid" htmlFor="rvc-links">B 站 BV/av 或 YouTube 单视频链接，每行一个</label>
+            <label className="block text-sm text-mid" htmlFor="rvc-links">B 站短链接、BV/av 或 YouTube 单视频链接，每行一个</label>
             <textarea className="input-field !h-auto w-full" id="rvc-links" rows={2} value={urls} onChange={e => setUrls(e.target.value)} />
             <button className="btn btn-secondary" disabled={busy || !urls.trim()}>添加链接</button>
           </form>
