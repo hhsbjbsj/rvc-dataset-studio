@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { RunAction } from '@/components/RvcSources'
 import { RvcWaveformRange } from '@/components/RvcWaveformRange'
 import { api } from '@/lib/api'
@@ -7,6 +7,7 @@ import { API_URL } from '@/lib/config'
 type AudioInfo = { duration: number; offset: number }
 export type AudioRange = { start: number; end: number }
 type Draft = { id: string; start: string; end: string }
+type RangePreview = AudioRange & { id: string; loop: boolean }
 type SaveRanges = (ranges: AudioRange[], onSaved: () => void) => void
 const MAX_RANGES = 50
 
@@ -33,8 +34,9 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
   const [activeId, setActiveId] = useState<string>()
   const [position, setPosition] = useState(offset)
   const [playbackError, setPlaybackError] = useState('')
+  const [loopingId, setLoopingId] = useState<string>()
   const player = useRef<HTMLAudioElement>(null)
-  const previewEnd = useRef<number | null>(null)
+  const preview = useRef<RangePreview | null>(null)
   const active = drafts.find(draft => draft.id === activeId) ?? drafts[0]
   const waveRanges = useMemo(() => drafts.flatMap((draft, index) => {
     const start = Number(draft.start)
@@ -52,7 +54,57 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
       : [...previous, draft])
     setActiveId(id)
   }, [duration, limit, offset])
-  const clearPreview = useCallback(() => { previewEnd.current = null }, [])
+  const clearPreview = useCallback(() => {
+    preview.current = null
+    setLoopingId(undefined)
+  }, [])
+  const stopPreview = useCallback(() => {
+    clearPreview()
+    player.current?.pause()
+  }, [clearPreview])
+  const seekWaveform = useCallback(() => {
+    if (!preview.current?.loop) clearPreview()
+  }, [clearPreview])
+
+  const keepPreviewInRange = useCallback((audio: HTMLAudioElement) => {
+    const current = preview.current
+    if (!current || audio.paused || audio.seeking) return
+    const end = Math.min(current.end, audio.duration || current.end)
+    if (current.loop) {
+      if (audio.currentTime < current.start || audio.currentTime >= end) audio.currentTime = current.start
+    } else if (audio.currentTime >= end) {
+      stopPreview()
+      audio.currentTime = end
+    }
+  }, [stopPreview])
+
+  useEffect(() => {
+    const current = preview.current
+    const audio = player.current
+    if (!current?.loop || !audio) return
+    const range = waveRanges.find(item => item.id === current.id)
+    if (!range) {
+      stopPreview()
+      return
+    }
+    current.start = range.start
+    current.end = range.end
+    keepPreviewInRange(audio)
+  }, [keepPreviewInRange, stopPreview, waveRanges])
+
+  useEffect(() => {
+    const audio = player.current
+    if (!loopingId || !audio) return
+    // Check the loop boundary between the browser's periodic timeupdate events.
+    let frame: number
+    const tick = () => {
+      if (!preview.current?.loop) return
+      keepPreviewInRange(audio)
+      frame = requestAnimationFrame(tick)
+    }
+    frame = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(frame)
+  }, [keepPreviewInRange, loopingId])
 
   function rangeError(draft: Draft) {
     const start = Number(draft.start)
@@ -76,39 +128,52 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
     updateDraft(field, String(Math.max(offset, Math.min(limit, Number((audio.currentTime + offset).toFixed(3))))))
   }
 
-  function preview(draft: Draft) {
+  function playPreview(audio: HTMLAudioElement, current: RangePreview) {
+    void audio.play().catch(() => {
+      if (preview.current !== current) return
+      clearPreview()
+      setPlaybackError('暂时无法播放这段音频。')
+    })
+  }
+
+  function previewRange(draft: Draft, loop: boolean) {
     const audio = player.current
     if (!audio || rangeError(draft)) return
     setPlaybackError('')
     setActiveId(draft.id)
-    audio.currentTime = Number(draft.start) - offset
-    previewEnd.current = Number(draft.end) - offset
-    void audio.play().catch(() => {
-      previewEnd.current = null
-      setPlaybackError('暂时无法播放这段音频。')
-    })
+    const current = { id: draft.id, start: Number(draft.start) - offset, end: Number(draft.end) - offset, loop }
+    preview.current = current
+    setLoopingId(loop ? draft.id : undefined)
+    audio.currentTime = current.start
+    playPreview(audio, current)
   }
 
   return (
     <div className="space-y-3">
       <RvcWaveformRange path={waveformPath} player={player} duration={duration} offset={offset}
         ranges={waveRanges} activeId={active?.id} busy={busy} canDraw={drafts.length < MAX_RANGES}
-        onChange={updateWaveRange} onSeek={clearPreview} />
+        onChange={updateWaveRange} onSeek={seekWaveform} />
       <audio ref={player} className="w-full" aria-label={fromClip ? '待截取片段' : '原音轨'} controls preload="metadata"
         src={audioUrl}
         onError={() => {
+          clearPreview()
           setPlaybackError('音频加载失败，请重新打开编辑。')
           onLoadError?.()
         }}
-        onPause={clearPreview}
+        onPause={event => {
+          const audio = event.currentTarget
+          if (audio.paused && !(audio.ended && preview.current?.loop)) clearPreview()
+        }}
+        onEnded={event => {
+          const audio = event.currentTarget
+          const current = preview.current
+          if (!current?.loop || !audio.paused) return
+          audio.currentTime = current.start
+          playPreview(audio, current)
+        }}
         onTimeUpdate={event => {
           const audio = event.currentTarget
-          const endTime = previewEnd.current
-          if (endTime !== null && audio.currentTime >= endTime) {
-            previewEnd.current = null
-            audio.pause()
-            audio.currentTime = endTime
-          }
+          keepPreviewInRange(audio)
           setPosition(audio.currentTime + offset)
         }} />
       <p className="text-xs text-lo">
@@ -119,13 +184,19 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
           {drafts.map((draft, index) => {
             const number = index + 1
             const error = rangeError(draft)
+            const looping = draft.id === loopingId
             return (
               <li key={draft.id} className="flex flex-wrap items-center gap-2 rounded-md border border-white/10 p-2 text-sm text-mid">
                 <button className="btn btn-secondary btn-sm" aria-pressed={draft.id === active?.id} disabled={busy}
                   onClick={() => setActiveId(draft.id)}>选区 {number}</button>
                 <span className="tabular-nums">{draft.start || '—'} – {draft.end || '—'} 秒</span>
                 <button className="btn btn-secondary btn-sm" aria-label={'试听选区 ' + number} disabled={busy || !!error}
-                  onClick={() => preview(draft)}>试听</button>
+                  onClick={() => previewRange(draft, false)}>试听</button>
+                <button className={looping ? 'btn btn-primary btn-sm' : 'btn btn-secondary btn-sm'}
+                  aria-label={(looping ? '停止循环选区 ' : '循环试听选区 ') + number} disabled={busy || !!error}
+                  onClick={() => looping ? stopPreview() : previewRange(draft, true)}>
+                  {looping ? '停止循环' : '循环试听'}
+                </button>
                 <button className="btn btn-secondary btn-sm" aria-label={'移除选区 ' + number} disabled={busy}
                   onClick={() => setDrafts(previous => previous.filter(item => item.id !== draft.id))}>移除</button>
                 {error && <span className="text-xs text-lo">{error}</span>}
@@ -155,7 +226,11 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
         }}>手动添加选区</button>
         <button className="btn btn-primary btn-sm"
           disabled={busy || !drafts.length || hasDuplicates || drafts.some(rangeError)}
-          onClick={() => onSave(ranges, () => { setDrafts([]); setActiveId(undefined) })}>
+          onClick={() => onSave(ranges, () => {
+            if (preview.current) stopPreview()
+            setDrafts([])
+            setActiveId(undefined)
+          })}>
           保存全部选区{drafts.length > 0 && '（' + drafts.length + ' 段）'}
         </button>
       </div>
