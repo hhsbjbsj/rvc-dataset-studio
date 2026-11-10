@@ -301,9 +301,20 @@ def test_manual_edit_uses_the_source_timeline(client, speech, monkeypatch):
     assert merged["review"] == "pending" and merged["quality"]["edit"] == "merge"
     assert merged["replaced_count"] == 2
     assert client.get(base + "/clips").json()["total"] == len(clips) - 1
-    assert clip_audio(first).status_code == clip_audio(second).status_code == 404
-    assert not any(path.exists() for path in old_paths)
+    buffer_url = base + "/merge-buffer"
+    assert {row["id"] for row in client.get(buffer_url).json()["clips"]} == set(selected["clip_ids"])
+    assert clip_audio(first).status_code == clip_audio(second).status_code == 200
+    assert all(path.exists() for path in old_paths)
     assert client.post(base + "/export", json=selected).status_code == 400
+    assert client.delete(buffer_url + "/" + merged["id"]).status_code == 404
+
+    assert client.delete(buffer_url + "/" + first["id"]).status_code == 200
+    assert clip_audio(first).status_code == 404
+    assert not old_paths[0].exists()
+    assert post(client, buffer_url + "/" + second["id"] + "/restore", {})["id"] == second["id"]
+    assert old_paths[1].is_file()
+    assert client.get(buffer_url).json()["clips"] == []
+    assert second["id"] in {row["id"] for row in client.get(base + "/clips").json()["clips"]}
 
     with wave.open(io.BytesIO(clip_audio(merged).content)) as wav:
         begin, end = (round(merged[key] * rate) for key in ("start", "end"))
@@ -314,7 +325,8 @@ def test_manual_edit_uses_the_source_timeline(client, speech, monkeypatch):
     saved = post(client, source_base + "/clips", {"start": merged["start"], "end": third["end"]})
     reused = post(client, merge_url, {"clip_ids": [merged["id"], third["id"]]})
     assert reused["id"] == saved["id"] and reused["replaced_count"] == 2
-    assert clip_audio(merged).status_code == clip_audio(third).status_code == 404
+    assert {row["id"] for row in client.get(buffer_url).json()["clips"]} == {merged["id"], third["id"]}
+    assert clip_audio(merged).status_code == clip_audio(third).status_code == 200
     assert clip_audio(reused).content.startswith(b"RIFF")
 
     trimmed = post(client, source_base + "/clips", {"start": 0.25, "end": 0.65})
@@ -322,7 +334,7 @@ def test_manual_edit_uses_the_source_timeline(client, speech, monkeypatch):
     with wave.open(io.BytesIO(clip_audio(trimmed).content)) as wav:
         assert wav.readframes(wav.getnframes()) == source_samples[12000:31200].astype("<i2").tobytes()
     assert client.post(source_base + "/clips", json={"start": 0, "end": info["duration"] + 0.2}).status_code == 400
-    assert client.get(base).json()["review"]["pending"]["count"] == len(clips) - 1
+    assert client.get(base).json()["review"]["pending"]["count"] == len(clips)
 
 
 def test_failed_download_retry_and_silence(client, speech, monkeypatch):

@@ -8,12 +8,12 @@ from pathlib import Path
 from threading import Lock
 
 import soundfile as sf
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from processing.rvc_audio import MediaError, WORK_RATE, check_space, ffmpeg, media_path, write_clip
-from rvc_projects import RvcClip, RvcSource, clip_data, clip_path, new_id, work_dir
+from rvc_projects import RvcClip, RvcMergeBuffer, RvcSource, clip_data, clip_path, new_id, work_dir
 from sources.rvc_online import download
 
 logger = logging.getLogger(__name__)
@@ -100,11 +100,12 @@ def create_edit(
     digest = hashlib.sha256(f"manual:{source.id}:{first}:{last}:".encode() + raw).hexdigest()
     existing = select(RvcClip).where(RvcClip.project_id == project_id, RvcClip.digest == digest)
     clip = db.scalar(existing)
-    if clip is not None and replace is None:
+    buffered_result = db.get(RvcMergeBuffer, clip.id) if clip is not None else None
+    if clip is not None and replace is None and buffered_result is None:
         return clip_data(clip, source)
 
     destination = None
-    retired_paths = []
+    buffered_count = 0
     try:
         if clip is None:
             generation = new_id()
@@ -118,14 +119,13 @@ def create_edit(
             clip = RvcClip(id=new_id(), project_id=project_id, source_id=source.id, generation=generation, **data)
             db.add(clip)
 
+        if buffered_result is not None:
+            restore_buffer_audio(clip)
+            db.delete(buffered_result)
         if replace is not None:
             retired = [item for item in replace if item.id != clip.id]
-            retired_paths = [clip_path(item) for item in retired]
-            deleted = db.execute(
-                delete(RvcClip).where(RvcClip.project_id == project_id, RvcClip.id.in_([item.id for item in retired]))
-            )
-            if deleted.rowcount != len(retired):
-                raise MediaError("所选片段已被修改，请重新选择。")
+            db.add_all(RvcMergeBuffer(clip_id=item.id) for item in retired)
+            buffered_count = len(retired)
         db.commit()
     except Exception as exc:
         db.rollback()
@@ -138,15 +138,41 @@ def create_edit(
             raise MediaError("片段已被另一项操作修改，请重新选择。") from exc
         raise
 
-    for retired_path in retired_paths:
-        try:
-            retired_path.unlink(missing_ok=True)
-            if retired_path.parent.is_dir() and not any(retired_path.parent.iterdir()):
-                retired_path.parent.rmdir()
-        except OSError:
-            logger.warning("Could not remove replaced audio file %s", retired_path, exc_info=True)
-
     result = clip_data(clip, source)
     if replace is not None:
-        result["replaced_count"] = len(retired_paths)
+        result["replaced_count"] = buffered_count
     return result
+
+
+def restore_buffer_audio(clip: RvcClip) -> None:
+    path = clip_path(clip)
+    staged = path.with_suffix(".deleting")
+    if not path.exists() and staged.is_file():
+        os.replace(staged, path)
+
+
+def delete_buffered_clip(db: Session, clip: RvcClip, entry: RvcMergeBuffer) -> None:
+    path = clip_path(clip)
+    staged = path.with_suffix(".deleting")
+    try:
+        if path.is_file():
+            os.replace(path, staged)
+    except OSError as exc:
+        raise MediaError("暂时无法移除音频文件，请暂停试听后重试。") from exc
+
+    try:
+        db.delete(entry)
+        db.flush()
+        db.delete(clip)
+        db.commit()
+    except Exception:
+        db.rollback()
+        restore_buffer_audio(clip)
+        raise
+
+    try:
+        staged.unlink(missing_ok=True)
+        if path.parent.is_dir() and not any(path.parent.iterdir()):
+            path.parent.rmdir()
+    except OSError:
+        logger.warning("Could not clean up staged audio file %s", staged, exc_info=True)

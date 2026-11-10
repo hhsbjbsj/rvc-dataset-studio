@@ -61,6 +61,8 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
   const [sampleRate, setSampleRate] = useState(40000)
   const [exports, setExports] = useState<ExportBatch[]>([])
   const [manualClip, setManualClip] = useState<ManualClip>()
+  const [bufferOpen, setBufferOpen] = useState(false)
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string>()
   const details = useQuery({
     queryKey: ['rvc-project', id],
     queryFn: async () => (await api.get<ProjectDetails>(base)).data,
@@ -69,6 +71,12 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
   const clipPage = useQuery({
     queryKey: ['rvc-clips', id, page],
     queryFn: async () => (await api.get<{ clips: Clip[]; total: number }>(base + '/clips', { params: { page } })).data,
+  })
+  const bufferKey = ['rvc-merge-buffer', id]
+  const buffer = useQuery({
+    queryKey: bufferKey,
+    queryFn: async () => (await api.get<{ clips: Clip[] }>(base + '/merge-buffer')).data,
+    enabled: bufferOpen,
   })
   const sources = details.data?.sources ?? []
   const revision = sources.map(source => source.id + ':' + source.status).join('|')
@@ -108,9 +116,25 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
       setManualClip(undefined)
       const { data } = await api.post<ManualClip>(base + path, payload)
       if (merging) setSelected([data.id])
+      await queryClient.invalidateQueries({ queryKey: bufferKey })
       setManualClip(data)
       refresh()
       await queryClient.invalidateQueries({ queryKey: ['rvc-clips', id] })
+    })
+  }
+
+  function updateBufferedClip(clipId: string, restore: boolean) {
+    run(restore ? '恢复片段' : '删除缓冲区片段', async () => {
+      const path = base + '/merge-buffer/' + clipId
+      if (restore) {
+        await api.post(path + '/restore')
+        refresh()
+        await queryClient.invalidateQueries({ queryKey: ['rvc-clips', id] })
+      } else {
+        await api.delete(path)
+      }
+      setConfirmDeleteId(undefined)
+      await queryClient.invalidateQueries({ queryKey: bufferKey })
     })
   }
 
@@ -202,7 +226,7 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
         {manualClip && (
           <div className="hairline-b space-y-2 pb-4" aria-label="手工片段结果">
             <p className="text-sm text-hi" role="status">
-              {manualClip.replaced_count === undefined ? '手工片段已就绪' : '合并完成，已替换 ' + manualClip.replaced_count + ' 段'}
+              {manualClip.replaced_count === undefined ? '手工片段已就绪' : '合并完成，已将 ' + manualClip.replaced_count + ' 段旧片段移入缓冲区'}
               {' · '}{timestamp(manualClip.start)}–{timestamp(manualClip.end)}
             </p>
             <audio className="h-9 max-w-full" controls preload="none" aria-label="试听手工片段"
@@ -210,6 +234,45 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
             <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => setSelected([manualClip.id])}>只勾选这个手工片段</button>
           </div>
         )}
+        <details className="hairline-b space-y-3 pb-4" onToggle={e => {
+          setBufferOpen(e.currentTarget.open)
+          if (!e.currentTarget.open) setConfirmDeleteId(undefined)
+        }}>
+          <summary className="cursor-pointer font-medium text-hi">
+            合并缓冲区{buffer.data ? '（' + buffer.data.clips.length + ' 段）' : ''}
+          </summary>
+          {bufferOpen && (
+            <div className="space-y-3">
+              <p className="text-sm text-lo">试听合并前的旧片段。恢复会把旧片段放回审核列表，确认删除会永久移除该片段。</p>
+              {buffer.isError && <p role="alert" className="text-sm text-mid">{message(buffer.error)}</p>}
+              {buffer.isLoading && <p className="text-sm text-lo">正在加载缓冲区…</p>}
+              {buffer.data?.clips.length === 0 && <p className="text-sm text-lo">缓冲区为空。</p>}
+              <ul className="space-y-3">
+                {buffer.data?.clips.map(clip => (
+                  <li key={clip.id} className="hairline-b flex flex-wrap items-center gap-2 pb-2">
+                    <p className="min-w-48 flex-1 break-all text-sm text-hi">
+                      {clip.source_title} · {timestamp(clip.start)}–{timestamp(clip.end)}
+                    </p>
+                    {confirmDeleteId === clip.id ? (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-sm text-mid">永久删除这段音频？</span>
+                        <button className="btn btn-danger btn-sm" disabled={busy} onClick={() => updateBufferedClip(clip.id, false)}>确认删除</button>
+                        <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => setConfirmDeleteId(undefined)}>取消</button>
+                      </div>
+                    ) : (
+                      <>
+                        <audio className="h-9 max-w-full" controls preload="none" aria-label={'试听缓冲区片段 ' + timestamp(clip.start)}
+                          src={API_URL + base + '/clips/' + clip.id + '/audio'} />
+                        <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => updateBufferedClip(clip.id, true)}>恢复到列表</button>
+                        <button className="btn btn-danger btn-sm" disabled={busy} onClick={() => setConfirmDeleteId(clip.id)}>删除…</button>
+                      </>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </details>
         {clipPage.isError && <p role="alert" className="text-sm text-lo">{message(clipPage.error)}</p>}
         {!clipPage.data?.clips.length && <p className="text-sm text-lo">处理完成后，片段会出现在这里。</p>}
         {!!(clipPage.data?.clips.length || selected.length) && (
@@ -225,7 +288,7 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
             <button className="btn btn-secondary btn-sm" disabled={busy || !hasSelection || selected.length < 2}
               onClick={() => saveManualClip('/clips/merge', { clip_ids: selected })}>合并所选片段</button>
             <span className="text-sm text-mid" aria-live="polite">已勾选 {selected.length} 段</span>
-            {selected.length >= 2 && <p className="w-full text-xs text-lo">同一素材中的片段可合并。合并成功后，新片段会替换所选旧片段，并保留起点到终点之间的原音。</p>}
+            {selected.length >= 2 && <p className="w-full text-xs text-lo">同一素材中的片段可合并。合并成功后，所选旧片段会移入缓冲区。新片段保留起点到终点之间的原音。</p>}
           </div>
         )}
         {!!(clipPage.data?.total || selected.length || exports.length) && (

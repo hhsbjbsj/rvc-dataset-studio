@@ -16,10 +16,10 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from processing.rvc_audio import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS, MediaError, probe
-from processing.rvc_edit import create_edit, source_audio_info, source_audio_path
+from processing.rvc_edit import create_edit, delete_buffered_clip, restore_buffer_audio, source_audio_info, source_audio_path
 from processing.rvc_export import export_dataset
 from rvc_projects import (
-    RvcClip, RvcProject, RvcSource, clip_data, clip_path, export_root, project_data, source_data,
+    RvcClip, RvcMergeBuffer, RvcProject, RvcSource, active_clip, clip_data, clip_path, export_root, project_data, source_data,
 )
 from sources.rvc_online import resolve_source_url, search_bilibili_page
 from workers.rvc_worker import update_source
@@ -161,7 +161,7 @@ def project_details(project_id: Identifier, db: DB):
     sources = db.scalars(select(RvcSource).where(RvcSource.project_id == project_id).order_by(RvcSource.created_at)).all()
     stats = db.execute(
         select(RvcClip.review, func.count(), func.sum(RvcClip.duration))
-        .where(RvcClip.project_id == project_id).group_by(RvcClip.review)
+        .where(RvcClip.project_id == project_id, active_clip()).group_by(RvcClip.review)
     ).all()
     return {
         **project_data(project), "sources": [source_data(source) for source in sources],
@@ -365,7 +365,7 @@ def cut_clip(project_id: Identifier, source_id: Identifier, data: ClipRange, db:
 def merge_clips(project_id: Identifier, data: MergeInput, db: DB):
     with clip_file_lock:
         ids = set(data.clip_ids)
-        clips = db.scalars(select(RvcClip).where(RvcClip.project_id == project_id, RvcClip.id.in_(ids))).all()
+        clips = db.scalars(select(RvcClip).where(RvcClip.project_id == project_id, RvcClip.id.in_(ids), active_clip())).all()
         if len(clips) != len(ids) or len(clips) < 2:
             raise HTTPException(400, "请选择当前项目中仍存在的至少两个片段。")
         source_ids = {clip.source_id for clip in clips}
@@ -380,27 +380,75 @@ def merge_clips(project_id: Identifier, data: MergeInput, db: DB):
             raise HTTPException(400, str(exc)) from exc
 
 
+@router.get("/projects/{project_id}/merge-buffer")
+def merge_buffer(project_id: Identifier, db: DB):
+    get_project(db, project_id)
+    rows = db.execute(
+        select(RvcClip, RvcSource).join(RvcSource).join(RvcMergeBuffer)
+        .where(RvcClip.project_id == project_id)
+        .order_by(RvcMergeBuffer.created_at.desc(), RvcClip.start, RvcClip.id)
+    )
+    return {"clips": [clip_data(clip, source) for clip, source in rows]}
+
+
+def get_buffer_entry(db: Session, project_id: str, clip_id: str) -> tuple[RvcClip, RvcMergeBuffer]:
+    row = db.execute(
+        select(RvcClip, RvcMergeBuffer).join(RvcMergeBuffer)
+        .where(RvcClip.project_id == project_id, RvcClip.id == clip_id)
+    ).one_or_none()
+    if row is None:
+        raise HTTPException(404, "该片段不在此项目的合并缓冲区中。")
+    clip, entry = row
+    return clip, entry
+
+
+@router.post("/projects/{project_id}/merge-buffer/{clip_id}/restore")
+def restore_merged_clip(project_id: Identifier, clip_id: Identifier, db: DB):
+    with clip_file_lock:
+        clip, entry = get_buffer_entry(db, project_id, clip_id)
+        restore_buffer_audio(clip)
+        db.delete(entry)
+        db.commit()
+    return {"id": clip_id}
+
+
+@router.delete("/projects/{project_id}/merge-buffer/{clip_id}")
+def delete_merged_clip(project_id: Identifier, clip_id: Identifier, db: DB):
+    with clip_file_lock:
+        clip, entry = get_buffer_entry(db, project_id, clip_id)
+        try:
+            delete_buffered_clip(db, clip, entry)
+        except MediaError as exc:
+            raise HTTPException(409, str(exc)) from exc
+    return {"id": clip_id}
+
+
 @router.get("/projects/{project_id}/clips")
 def clips(project_id: Identifier, db: DB, page: Annotated[int, Query(ge=1)] = 1):
     get_project(db, project_id)
-    filtered = select(RvcClip, RvcSource).join(RvcSource).where(RvcClip.project_id == project_id)
+    filtered = select(RvcClip, RvcSource).join(RvcSource).where(RvcClip.project_id == project_id, active_clip())
     rows = db.execute(filtered.order_by(RvcSource.created_at, RvcClip.start, RvcClip.id).limit(100).offset((page - 1) * 100))
-    total = db.scalar(select(func.count()).select_from(RvcClip).where(RvcClip.project_id == project_id))
+    total = db.scalar(select(func.count()).select_from(RvcClip).where(RvcClip.project_id == project_id, active_clip()))
     return {"clips": [clip_data(clip, source) for clip, source in rows], "total": total}
 
 
 @router.get("/projects/{project_id}/clips/{clip_id}/audio")
 def clip_audio(project_id: Identifier, clip_id: Identifier, db: DB):
     clip = db.get(RvcClip, clip_id)
-    if clip is None or clip.project_id != project_id or not clip_path(clip).is_file():
+    if clip is None or clip.project_id != project_id:
         raise HTTPException(404, "片段文件不存在。")
-    return FileResponse(clip_path(clip), media_type="audio/wav")
+    path = clip_path(clip)
+    if not path.is_file() and db.get(RvcMergeBuffer, clip_id) is not None:
+        path = path.with_suffix(".deleting")
+    if not path.is_file():
+        raise HTTPException(404, "片段文件不存在。")
+    return FileResponse(path, media_type="audio/wav")
 
 
 @router.patch("/projects/{project_id}/clips/review")
 def review_clips(project_id: Identifier, data: ReviewInput, db: DB):
     get_project(db, project_id)
-    filters = [RvcClip.project_id == project_id]
+    filters = [RvcClip.project_id == project_id, active_clip()]
     if data.ids is None:
         filters.append(RvcClip.review == "pending")
     else:
@@ -418,7 +466,7 @@ def export_project(project_id: Identifier, data: ExportInput, db: DB):
         selection = RvcClip.review == "kept" if selected is None else RvcClip.id.in_(selected)
         rows = db.execute(
             select(RvcClip, RvcSource).join(RvcSource)
-            .where(RvcClip.project_id == project_id, selection)
+            .where(RvcClip.project_id == project_id, selection, active_clip())
             .order_by(RvcSource.created_at, RvcClip.start, RvcClip.id)
         ).all()
         if selected is not None and len(rows) != len(selected):

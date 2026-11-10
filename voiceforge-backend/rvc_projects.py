@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, select
 from sqlalchemy.orm import Mapped, mapped_column
 
 from config import get_settings
@@ -67,6 +67,17 @@ class RvcClip(Base):
     duration: Mapped[float] = mapped_column(Float)
     quality: Mapped[dict] = mapped_column(JSON)
     review: Mapped[str] = mapped_column(String(12), default="pending")
+
+
+class RvcMergeBuffer(Base):
+    __tablename__ = "rvc_merge_buffer"
+
+    clip_id: Mapped[str] = mapped_column(ForeignKey("rvc_clips.id"), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+def active_clip():
+    return RvcClip.id.not_in(select(RvcMergeBuffer.clip_id))
 
 
 def project_data(project: RvcProject) -> dict:
