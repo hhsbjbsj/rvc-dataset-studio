@@ -48,7 +48,7 @@ internal static class LauncherText
         ["viewUpdate"] = ("更新说明", "Release notes", "更新内容"),
         ["updateVersions"] = ("当前 v{0} · 最新 {1}", "Installed v{0} · Latest {1}", "現在 v{0} · 最新 {1}"),
         ["installUpdate"] = ("下载并重启更新", "Download and restart", "ダウンロードして再起動"),
-        ["updateRestartHint"] = ("更新会重开启动器并停止本机工作台。请先保存编辑，等待处理任务完成。", "Updating restarts the launcher and stops its studio. Save edits and let processing finish first.", "更新時にランチャーを再起動し、スタジオを停止します。編集を保存し、処理の完了をお待ちください。"),
+        ["updateRestartHint"] = ("更新会保留角色项目、导出历史和壁纸设置。安装时会停止工作台并重开启动器，请先保存编辑，等待处理任务完成。", "Updates keep your character projects, export history, and wallpaper settings. Installation stops the studio and restarts the launcher. Save edits and let processing finish first.", "キャラクタープロジェクト、書き出し履歴、壁紙設定は引き継がれます。インストール時にスタジオを停止し、ランチャーを再起動します。編集を保存し、処理の完了をお待ちください。"),
         ["updatePackageMissing"] = ("此版本暂时没有可安装的 Windows 更新包。", "This release has no installable Windows package yet.", "このリリースの Windows 更新パッケージはまだありません。"),
         ["updateOtherService"] = ("请先关闭另一个启动器及它运行的工作台，然后重试更新。", "Close the other launcher and its running studio, then try again.", "別のランチャーとそのスタジオを終了してから再試行してください。"),
         ["updateDownloading"] = ("正在下载更新 · {0}%", "Downloading update · {0}%", "更新をダウンロード中 · {0}%"),
