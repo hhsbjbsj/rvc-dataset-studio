@@ -19,6 +19,7 @@ type Props = {
   canDraw: boolean
   onChange: (id: string, start: number, end: number) => void
   onSelect: (id: string) => void
+  onNavigate: (id: string) => void
   onSeek: () => void
 }
 
@@ -26,7 +27,7 @@ const inactiveColor = 'rgba(124, 140, 255, 0.20)'
 const activeColor = 'rgba(124, 140, 255, 0.40)'
 const regionOptions = { drag: false, contentEditable: false, color: inactiveColor }
 
-export function RvcWaveformRange({ path, player, container, duration, offset, ranges, activeId, busy, canDraw, onChange, onSelect, onSeek }: Props) {
+export function RvcWaveformRange({ path, player, container, duration, offset, ranges, activeId, busy, canDraw, onChange, onSelect, onNavigate, onSeek }: Props) {
   const instance = useRef<WaveSurfer | null>(null)
   const regionsRef = useRef<Regions | null>(null)
   const syncing = useRef(false)
@@ -142,7 +143,7 @@ export function RvcWaveformRange({ path, player, container, duration, offset, ra
     const nextIndex = previous && index < 0 ? ranges.length - 1 : index + (previous ? -1 : 1)
     const next = ranges[nextIndex]
     if (!next) return
-    onSelect(next.id)
+    onNavigate(next.id)
 
     const wave = instance.current
     if (!wave || !ready || zoom === 1) return

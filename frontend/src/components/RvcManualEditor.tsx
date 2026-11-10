@@ -142,6 +142,21 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
     setDrafts(previous => previous.map(draft => draft.id === active?.id ? { ...draft, [field]: value } : draft))
   }
 
+  function isLoopRunning() {
+    const current = preview.current
+    const audio = player.current
+    return Boolean(current?.loop && !current.suspended && audio && (!audio.paused || audio.ended))
+  }
+
+  function navigateDraft(id: string) {
+    if (isLoopRunning()) {
+      const draft = drafts.find(item => item.id === id)
+      if (draft && previewRange(draft, true)) return
+      stopPreview()
+    }
+    setActiveId(id)
+  }
+
   function removeDraft(id: string, redo = false) {
     const index = drafts.findIndex(draft => draft.id === id)
     if (index < 0) return
@@ -154,11 +169,8 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
       const neighbor = next ?? waveRanges[waveIndex - 1]
       setActiveId(neighbor?.id)
     }
-    const current = preview.current
-    const audio = player.current
-    const removedPreview = current?.id === id
-    const advanceLoop = (selectNeighbor || removedPreview) && waveIndex >= 0
-      && current?.loop && !current.suspended && audio && (!audio.paused || audio.ended)
+    const removedPreview = preview.current?.id === id
+    const advanceLoop = (selectNeighbor || removedPreview) && waveIndex >= 0 && isLoopRunning()
     if (advanceLoop) {
       const nextDraft = next && drafts.find(draft => draft.id === next.id)
       if (!nextDraft || !previewRange(nextDraft, true)) stopPreview()
@@ -296,7 +308,7 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
     <div className="space-y-3" onKeyDown={handleEditorKeys}>
       <RvcWaveformRange path={waveformPath} player={player} container={waveform} duration={duration} offset={offset}
         ranges={waveRanges} activeId={active?.id} busy={busy} canDraw={drafts.length < MAX_RANGES}
-        onChange={updateWaveRange} onSelect={setActiveId} onSeek={seekWaveform} />
+        onChange={updateWaveRange} onSelect={setActiveId} onNavigate={navigateDraft} onSeek={seekWaveform} />
       <audio ref={player} className="w-full" aria-label={fromClip ? '待截取片段' : '原音轨'} controls preload="metadata"
         src={audioUrl}
         onRateChange={event => setPlaybackRate(event.currentTarget.playbackRate)}
@@ -392,7 +404,7 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
         <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => mark('end')}>标记终点</button>
       </div>}
       {active && <p className="text-xs text-lo">
-        聚焦波形后用 ↑ / ↓ 切换选区。← / → 调起点，Shift + ← / → 调终点，时间框用 ↑ / ↓，每次 0.01 秒。空格循环试听当前选区，再按暂停或继续。
+        聚焦波形后用 ↑ / ↓ 切换选区，循环中会从新选区的开头继续。← / → 调起点，Shift + ← / → 调终点，时间框用 ↑ / ↓，每次 0.01 秒。空格循环试听当前选区，再按暂停或继续。
       </p>}
       <div className="flex flex-wrap items-center gap-2">
         <button className="btn btn-secondary btn-sm" disabled={busy || drafts.length >= MAX_RANGES} onClick={() => {
