@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from processing.rvc_audio import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS, MediaError, probe
-from processing.rvc_edit import create_edit, delete_buffered_clip, restore_buffer_audio, source_audio_info, source_audio_path, trim_clip
+from processing.rvc_edit import create_edit, delete_buffered_clip, restore_buffer_audio, source_audio_info, source_audio_path, trim_clip, waveform_peaks
 from processing.rvc_export import export_dataset
 from rvc_projects import (
     RvcClip, RvcMergeBuffer, RvcProject, RvcSource, active_clip, clip_data, clip_path, export_root, project_data, source_data,
@@ -351,6 +351,18 @@ def original_audio(project_id: Identifier, source_id: Identifier, db: DB):
     return FileResponse(path, media_type="audio/flac")
 
 
+@router.get("/projects/{project_id}/sources/{source_id}/waveform")
+def source_waveform(project_id: Identifier, source_id: Identifier, db: DB):
+    get_editable_source(db, project_id, source_id)
+    path = source_audio_path(project_id, source_id)
+    if not path.is_file():
+        raise HTTPException(404, "请先载入原音轨。")
+    try:
+        return {"peaks": waveform_peaks(path)}
+    except MediaError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 @router.post("/projects/{project_id}/sources/{source_id}/clips")
 def cut_clip(project_id: Identifier, source_id: Identifier, data: ClipRange, db: DB):
     with clip_file_lock:
@@ -456,6 +468,17 @@ def clip_audio(project_id: Identifier, clip_id: Identifier, db: DB):
     if not path.is_file():
         raise HTTPException(404, "片段文件不存在。")
     return FileResponse(path, media_type="audio/wav")
+
+
+@router.get("/projects/{project_id}/clips/{clip_id}/waveform")
+def clip_waveform(project_id: Identifier, clip_id: Identifier, db: DB):
+    clip = db.scalar(select(RvcClip).where(RvcClip.project_id == project_id, RvcClip.id == clip_id, active_clip()))
+    if clip is None:
+        raise HTTPException(404, "片段不存在。")
+    try:
+        return {"peaks": waveform_peaks(clip_path(clip))}
+    except MediaError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @router.patch("/projects/{project_id}/clips/review")

@@ -273,6 +273,12 @@ def test_manual_edit_uses_the_source_timeline(client, speech, monkeypatch):
     assert ranged.status_code == 206 and ranged.content.startswith(b"fLaC")
     source_samples, rate = sf.read(io.BytesIO(client.get(source_base + "/original-audio").content), dtype="int16")
     assert rate == 48000
+    source_waveform = client.get(source_base + "/waveform")
+    assert source_waveform.status_code == 200
+    peaks = source_waveform.json()["peaks"]
+    assert len(peaks) == 8192
+    first_bin = source_samples[:len(source_samples) // len(peaks)]
+    assert peaks[0] == round(max(abs(int(sample)) for sample in first_bin) / 32768, 5)
 
     clips = client.get(base + "/clips").json()["clips"]
     first, second, third = clips[:3]
@@ -320,6 +326,10 @@ def test_manual_edit_uses_the_source_timeline(client, speech, monkeypatch):
         begin, end = (round(merged[key] * rate) for key in ("start", "end"))
         assert wav.readframes(wav.getnframes()) == source_samples[begin:end].astype("<i2").tobytes()
     assert client.post(merge_url, json=selected).status_code == 400
+
+    waveform = client.get(base + "/clips/" + merged["id"] + "/waveform")
+    assert waveform.status_code == 200 and max(waveform.json()["peaks"]) > 0
+    assert client.get(base + "/clips/" + first["id"] + "/waveform").status_code == 404
 
     trim_url = base + "/clips/" + merged["id"] + "/trim"
     assert client.post(trim_url, json={"start": 0, "end": merged["duration"]}).status_code == 400

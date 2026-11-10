@@ -62,8 +62,8 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
   const [exports, setExports] = useState<ExportBatch[]>([])
   const [manualClip, setManualClip] = useState<ManualClip>()
   const [trimTarget, setTrimTarget] = useState<Clip>()
+  const [trimResults, setTrimResults] = useState<Clip[]>([])
   const trimPanel = useRef<HTMLDivElement>(null)
-  const manualResult = useRef<HTMLDivElement>(null)
   const [bufferOpen, setBufferOpen] = useState(false)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string>()
   const details = useQuery({
@@ -123,12 +123,18 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
     run(merging ? '合并所选片段' : '生成手工片段', async () => {
       const { data } = await api.post<ManualClip>(base + path, payload)
       if (merging || trimming) setSelected([data.id])
-      setManualClip(data)
-      setTrimTarget(merging ? data : undefined)
+      if (trimming) {
+        setTrimResults(previous => previous.some(clip => clip.id === data.id) ? previous : [...previous, data])
+      } else {
+        setManualClip(data)
+        setTrimTarget(merging ? data : undefined)
+      }
+      if ('clip_ids' in payload) {
+        setTrimResults(previous => previous.filter(clip => !payload.clip_ids.includes(clip.id) || clip.id === data.id))
+      }
       await queryClient.invalidateQueries({ queryKey: bufferKey })
       refresh()
       await queryClient.invalidateQueries({ queryKey: ['rvc-clips', id] })
-      if (trimming) manualResult.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
     })
   }
 
@@ -152,6 +158,10 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
       const { data } = await api.post<ExportResult>(base + '/export', { sample_rate: sampleRate, clip_ids: clipIds })
       setExports(previous => [{ ...data, scope: clipIds ? 'selected' : 'kept' }, ...previous])
     })
+  }
+
+  function selectClip(clipId: string, checked: boolean) {
+    setSelected(previous => checked ? [...previous, clipId] : previous.filter(id => id !== clipId))
   }
 
   const hasSelection = selected.length > 0 && selected.length <= MAX_BATCH_SIZE
@@ -233,10 +243,10 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
         <RvcManualEditor base={base} sources={sources.filter(source => source.status === 'done')} busy={busy} run={run}
           onSave={(sourceId, start, end) => saveManualClip('/sources/' + sourceId + '/clips', { start, end })} />
         {manualClip && (
-          <div ref={manualResult} className="hairline-b scroll-mt-24 space-y-2 pb-4" aria-label="手工片段结果">
+          <div className="hairline-b space-y-2 pb-4" aria-label="手工片段结果">
             <p className="text-sm text-hi" role="status">
               {manualClip.replaced_count === undefined
-                ? (manualClip.quality.edit === 'trim' ? '截取完成，新片段已勾选' : '手工片段已就绪')
+                ? '手工片段已就绪'
                 : '合并完成，已将 ' + manualClip.replaced_count + ' 段旧片段移入缓冲区'}
               {' · '}{timestamp(manualClip.start)}–{timestamp(manualClip.end)}
             </p>
@@ -259,7 +269,24 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
             <p className="text-sm text-lo">{trimTarget.source_title} · 原素材 {timestamp(trimTarget.start)}–{timestamp(trimTarget.end)}</p>
             <RvcAudioRangeEditor key={trimTarget.id} offset={0} duration={trimTarget.duration} busy={busy} fromClip
               audioUrl={API_URL + base + '/clips/' + trimTarget.id + '/audio'}
+              waveformPath={base + '/clips/' + trimTarget.id + '/waveform'}
               onSave={(start, end) => saveManualClip('/clips/' + trimTarget.id + '/trim', { start, end })} />
+          </div>
+        )}
+        {!!trimResults.length && (
+          <div className="hairline-b space-y-2 pb-4" aria-label="截取结果">
+            <p className="text-sm font-medium text-hi" role="status">本次已截取 {trimResults.length} 段</p>
+            <ul className="space-y-2">
+              {trimResults.map((clip, index) => (
+                <li key={clip.id} className="flex flex-wrap items-center gap-2 text-sm text-mid">
+                  <input type="checkbox" aria-label={'勾选截取结果 ' + (index + 1)} checked={selected.includes(clip.id)} disabled={busy}
+                    onChange={e => selectClip(clip.id, e.target.checked)} />
+                  <span>第 {index + 1} 段 · 原素材 {timestamp(clip.start)}–{timestamp(clip.end)}</span>
+                  <audio className="h-9 max-w-full" controls preload="none" aria-label={'试听截取结果 ' + (index + 1)}
+                    src={API_URL + base + '/clips/' + clip.id + '/audio'} />
+                </li>
+              ))}
+            </ul>
           </div>
         )}
         <details className="hairline-b space-y-3 pb-4" onToggle={e => {
@@ -349,7 +376,7 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
           {clipPage.data?.clips.map(clip => (
             <li key={clip.id} className="hairline-b flex flex-wrap items-center gap-3 pb-3">
               <input type="checkbox" aria-label={'选择片段 ' + timestamp(clip.start)} checked={selected.includes(clip.id)} disabled={busy}
-                onChange={e => setSelected(previous => e.target.checked ? [...previous, clip.id] : previous.filter(value => value !== clip.id))} />
+                onChange={e => selectClip(clip.id, e.target.checked)} />
               <div className="min-w-52 flex-1">
                 <p className="break-all text-sm text-hi">{clip.source_title} · {timestamp(clip.start)}–{timestamp(clip.end)}</p>
                 <p className="break-all text-xs text-lo">{clip.origin}</p>

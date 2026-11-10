@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 from threading import Lock
 
+import numpy as np
 import soundfile as sf
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -77,6 +78,26 @@ def source_audio_info(source: RvcSource) -> dict:
     path = prepare_source_audio(source)
     info = sf.info(str(path))
     return {"duration": info.frames / info.samplerate, "offset": source_offset(source)}
+
+
+def waveform_peaks(path: Path) -> list[float]:
+    """Summarize the audio in bounded blocks for drawing the waveform."""
+    try:
+        with sf.SoundFile(str(path)) as audio:
+            if not audio.frames:
+                raise MediaError("当前音频没有可显示的波形。")
+            # Evenly space the bins across the actual audio duration.
+            count = min(audio.frames, 8192)
+            peaks = []
+            previous = 0
+            for index in range(1, count + 1):
+                boundary = index * audio.frames // count
+                samples = audio.read(boundary - previous, dtype="float32")
+                peaks.append(round(float(np.max(np.abs(samples))), 5))
+                previous = boundary
+            return peaks
+    except sf.LibsndfileError as exc:
+        raise MediaError("当前音频文件无法读取。") from exc
 
 
 def create_edit(

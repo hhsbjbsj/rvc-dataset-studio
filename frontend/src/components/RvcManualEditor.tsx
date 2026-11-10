@@ -1,5 +1,6 @@
-import { useRef, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import type { RunAction } from '@/components/RvcSources'
+import { RvcWaveformRange } from '@/components/RvcWaveformRange'
 import { api } from '@/lib/api'
 import { API_URL } from '@/lib/config'
 
@@ -14,13 +15,14 @@ type Props = {
 
 type RangeProps = AudioInfo & {
   audioUrl: string
+  waveformPath: string
   busy: boolean
   fromClip?: boolean
   onSave: (start: number, end: number) => void
   onLoadError?: () => void
 }
 
-export function RvcAudioRangeEditor({ audioUrl, offset, duration, busy, fromClip = false, onSave, onLoadError }: RangeProps) {
+export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, busy, fromClip = false, onSave, onLoadError }: RangeProps) {
   const limit = offset + duration
   const [start, setStart] = useState(String(offset))
   const [end, setEnd] = useState(fromClip ? String(limit) : '')
@@ -32,6 +34,13 @@ export function RvcAudioRangeEditor({ audioUrl, offset, duration, busy, fromClip
   const last = Number(end)
   const validRange = !!start && !!end && first >= offset && last <= limit && last > first && last - first <= 120
   const canSave = validRange && (!fromClip || first > offset || last < limit)
+
+  const selectRange = useCallback((left: number, right: number) => {
+    setStart(String(Math.max(offset, Number((left + offset).toFixed(3)))))
+    setEnd(String(Math.min(limit, Number((right + offset).toFixed(3)))))
+  }, [limit, offset])
+  const waveStart = start && first >= offset && first < limit ? first - offset : 0
+  const waveEnd = end && last - offset > waveStart && last <= limit ? last - offset : duration
 
   function mark(setTime: (value: string) => void) {
     const audio = player.current
@@ -53,6 +62,8 @@ export function RvcAudioRangeEditor({ audioUrl, offset, duration, busy, fromClip
 
   return (
     <div className="space-y-3">
+      <RvcWaveformRange path={waveformPath} player={player} duration={duration} offset={offset}
+        start={waveStart} end={waveEnd} busy={busy} onChange={selectRange} />
       <audio ref={player} className="w-full" aria-label={fromClip ? '待截取片段' : '原音轨'} controls preload="metadata"
         src={audioUrl}
         onError={() => {
@@ -88,7 +99,7 @@ export function RvcAudioRangeEditor({ audioUrl, offset, duration, busy, fromClip
         <button className="btn btn-primary btn-sm" disabled={busy || !canSave} onClick={() => onSave(first, last)}>保存截取片段</button>
       </div>
       <p className="text-xs text-lo">
-        {fromClip ? '缩小范围后即可保存为新片段。' : '每个片段最长 120 秒。保存后可直接试听生成的 WAV。'}
+        {fromClip ? '每次保存会生成独立片段，可以接着在这条波形上选取下一段。' : '每个片段最长 120 秒。保存后可直接试听生成的 WAV。'}
       </p>
       {playbackError && <p role="alert" className="text-sm text-mid">{playbackError}</p>}
     </div>
@@ -130,7 +141,8 @@ export function RvcManualEditor({ base, sources, busy, run, onSave }: Props) {
         <button className="btn btn-secondary btn-sm" disabled={busy || !activeId || !!audioInfo} onClick={loadAudio}>载入原音轨</button>
       </div>
       {audioInfo && activeId && (
-        <RvcAudioRangeEditor key={activeId} {...audioInfo} audioUrl={API_URL + sourceUrl + '/original-audio'} busy={busy}
+        <RvcAudioRangeEditor key={activeId} {...audioInfo} audioUrl={API_URL + sourceUrl + '/original-audio'}
+          waveformPath={sourceUrl + '/waveform'} busy={busy}
           onSave={(start, end) => onSave(activeId, start, end)}
           onLoadError={() => {
             setAudioInfo(undefined)

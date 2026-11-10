@@ -506,6 +506,24 @@ html {
   }
 }
 
+.rvc-waveform ::part(region) {
+  pointer-events: none !important;
+}
+.rvc-waveform ::part(region-handle) {
+  width: 12px !important;
+  pointer-events: auto;
+  border-top: 3px solid var(--wave-1);
+  border-bottom: 3px solid var(--wave-1);
+}
+.rvc-waveform ::part(region-handle-left) {
+  border-left: 3px solid var(--wave-1) !important;
+  transform: translateX(-3px);
+}
+.rvc-waveform ::part(region-handle-right) {
+  border-right: 3px solid var(--wave-1) !important;
+  transform: translateX(3px);
+}
+
 /* Scrollbar */
 ::-webkit-scrollbar {
   width: 8px;
