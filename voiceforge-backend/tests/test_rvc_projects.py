@@ -217,6 +217,24 @@ def test_windows_mixed_media_review_and_export(client, speech, monkeypatch):
     preview = client.get(base + "/clips/" + clips[0]["id"] + "/audio")
     assert preview.status_code == 200 and preview.content.startswith(b"RIFF")
     assert client.post(base + "/export", json={}).status_code == 400
+    assert client.post(base + "/export", json={"clip_ids": []}).status_code == 422
+    assert client.post(base + "/export", json={"clip_ids": [clips[0]["id"], "0" * 32]}).status_code == 400
+
+    batches = []
+    for clip in (clips[0], clips[-1]):
+        selected_output = post(client, base + "/export", {"clip_ids": [clip["id"]], "sample_rate": 40000})
+        assert selected_output["count"] == 1
+        download = client.get(selected_output["download_url"])
+        assert download.status_code == 200
+        with zipfile.ZipFile(io.BytesIO(download.content)) as bundle:
+            metadata = json.loads(bundle.read("metadata.json"))
+            assert [item["id"] for item in metadata["clips"]] == [clip["id"]]
+            assert [name for name in bundle.namelist() if name.endswith(".wav")] == ["wavs/000001.wav"]
+        batches.append(download.headers["content-disposition"])
+    assert batches[0] != batches[1]
+    assert client.get(base).json()["review"]["pending"]["count"] == len(clips)
+    assert client.post(base + "/export", json={}).status_code == 400
+
     retained = clips[:-1]
     assert client.patch(base + "/clips/review", json={
         "ids": [clip["id"] for clip in retained], "review": "kept",

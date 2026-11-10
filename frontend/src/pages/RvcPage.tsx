@@ -18,6 +18,7 @@ type Clip = {
 }
 type ProjectDetails = Project & { sources: Source[]; review: Partial<Record<Review, { count: number; seconds: number }>> }
 type ExportResult = { directory: string; count: number; duration_seconds: number; download_url: string }
+type ExportBatch = ExportResult & { scope: "selected" | "kept" }
 
 const READY = ['ready', 'failed', 'cancelled']
 const ACTIVE = ['queued', 'running', 'cancelling']
@@ -29,6 +30,7 @@ const STAGES: Record<string, string> = { queued: '等待', download: '下载', p
 const REVIEW = { pending: '待审核', kept: '已保留', excluded: '已剔除' }
 const KIND: Record<string, string> = { local_video: '本地视频', local_audio: '本地音频', bilibili: 'Bilibili', youtube: 'YouTube' }
 const RATES = [16000, 22050, 24000, 32000, 40000, 44100, 48000]
+const MAX_BATCH_SIZE = 1000
 
 function message(error: unknown) {
   if (isAxiosError(error)) {
@@ -55,7 +57,7 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
   const [page, setPage] = useState(1)
   const [selected, setSelected] = useState<string[]>([])
   const [sampleRate, setSampleRate] = useState(40000)
-  const [output, setOutput] = useState<ExportResult>()
+  const [exports, setExports] = useState<ExportBatch[]>([])
   const details = useQuery({
     queryKey: ['rvc-project', id],
     queryFn: async () => (await api.get<ProjectDetails>(base)).data,
@@ -90,12 +92,14 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
     })
   }
 
-  function exportProject() {
-    run('生成数据集', async () => {
-      const { data } = await api.post<ExportResult>(base + '/export', { sample_rate: sampleRate })
-      setOutput(data)
+  function exportProject(clipIds?: string[]) {
+    run('生成 ZIP', async () => {
+      const { data } = await api.post<ExportResult>(base + '/export', { sample_rate: sampleRate, clip_ids: clipIds })
+      setExports(previous => [{ ...data, scope: clipIds ? 'selected' : 'kept' }, ...previous])
     })
   }
+
+  const hasSelection = selected.length > 0 && selected.length <= MAX_BATCH_SIZE
 
   return (
     <div className="space-y-5">
@@ -173,18 +177,49 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
         </p>
         {clipPage.isError && <p role="alert" className="text-sm text-lo">{message(clipPage.error)}</p>}
         {!clipPage.data?.clips.length && <p className="text-sm text-lo">处理完成后，片段会出现在这里。</p>}
-        {!!clipPage.data?.clips.length && (
-          <div className="flex flex-wrap gap-2">
-            <button className="btn btn-secondary btn-sm" onClick={() => setSelected(clipPage.data?.clips.map(clip => clip.id) ?? [])}>选择本页</button>
-            <button className="btn btn-secondary btn-sm" disabled={!selected.length} onClick={() => setSelected([])}>清除选择</button>
-            <button className="btn btn-secondary btn-sm" disabled={busy || !selected.length} onClick={() => review(selected, 'kept')}>保留所选</button>
-            <button className="btn btn-danger btn-sm" disabled={busy || !selected.length} onClick={() => review(selected, 'excluded')}>剔除所选</button>
+        {!!(clipPage.data?.clips.length || selected.length) && (
+          <div className="flex flex-wrap items-center gap-2">
+            <button className="btn btn-secondary btn-sm" disabled={busy || !clipPage.data?.clips.length}
+              onClick={() => {
+                const ids = clipPage.data?.clips.map(clip => clip.id) ?? []
+                setSelected(previous => [...new Set([...previous, ...ids])])
+              }}>选择本页</button>
+            <button className="btn btn-secondary btn-sm" disabled={busy || !selected.length} onClick={() => setSelected([])}>清除选择</button>
+            <button className="btn btn-secondary btn-sm" disabled={busy || !hasSelection} onClick={() => review(selected, 'kept')}>保留所选</button>
+            <button className="btn btn-danger btn-sm" disabled={busy || !hasSelection} onClick={() => review(selected, 'excluded')}>剔除所选</button>
+            <span className="text-sm text-mid" aria-live="polite">已勾选 {selected.length} 段</span>
+          </div>
+        )}
+        {!!(clipPage.data?.total || selected.length || exports.length) && (
+          <div className="hairline-b space-y-3 pb-4" aria-label="导出 RVC 数据集">
+            <p className="text-sm text-lo">勾选会跨页保留。每次导出生成独立 ZIP，包含单声道 16-bit PCM WAV。</p>
+            {selected.length > MAX_BATCH_SIZE && <p className="text-sm text-mid">每批最多处理 {MAX_BATCH_SIZE} 段，请减少勾选后再试。</p>}
+            <div className="flex flex-wrap items-end gap-3">
+              <label className="text-sm text-mid">采样率
+                <select className="input-field mt-1 block" value={sampleRate} disabled={busy} onChange={e => setSampleRate(Number(e.target.value))}>
+                  {RATES.map(rate => <option key={rate} value={rate}>{rate} Hz</option>)}
+                </select>
+              </label>
+              <button className="btn btn-primary" disabled={busy || !hasSelection} onClick={() => exportProject(selected)}>导出所选片段</button>
+              <button className="btn btn-secondary" disabled={busy || !details.data?.review.kept?.count} onClick={() => exportProject()}>导出已保留片段</button>
+            </div>
+            {!!exports.length && (
+              <ul className="space-y-2" aria-label="本次导出记录" aria-live="polite">
+                {exports.map((batch, index) => (
+                  <li className="flex flex-wrap items-center gap-2 text-sm text-mid" key={batch.download_url}>
+                    <span>第 {exports.length - index} 批 · {batch.scope === 'selected' ? '所选片段' : '已保留片段'} · {batch.count} 段 · {timestamp(batch.duration_seconds)}</span>
+                    <a className="btn btn-secondary btn-sm" href={API_URL + batch.download_url}>下载 ZIP</a>
+                    <p className="w-full break-all text-xs text-lo">{batch.directory}</p>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         )}
         <ul className="space-y-3">
           {clipPage.data?.clips.map(clip => (
             <li key={clip.id} className="hairline-b flex flex-wrap items-center gap-3 pb-3">
-              <input type="checkbox" aria-label={'选择片段 ' + timestamp(clip.start)} checked={selected.includes(clip.id)}
+              <input type="checkbox" aria-label={'选择片段 ' + timestamp(clip.start)} checked={selected.includes(clip.id)} disabled={busy}
                 onChange={e => setSelected(previous => e.target.checked ? [...previous, clip.id] : previous.filter(value => value !== clip.id))} />
               <div className="min-w-52 flex-1">
                 <p className="break-all text-sm text-hi">{clip.source_title} · {timestamp(clip.start)}–{timestamp(clip.end)}</p>
@@ -203,29 +238,10 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
         </ul>
         {(clipPage.data?.total ?? 0) > 100 && (
           <div className="flex items-center gap-3 text-sm text-lo">
-            <button className="btn btn-secondary btn-sm" disabled={page <= 1} onClick={() => { setSelected([]); setPage(page - 1) }}>上一页</button>
+            <button className="btn btn-secondary btn-sm" disabled={page <= 1} onClick={() => setPage(page - 1)}>上一页</button>
             <span>第 {page} 页，共 {clipPage.data?.total} 段</span>
             <button className="btn btn-secondary btn-sm" disabled={page * 100 >= (clipPage.data?.total ?? 0)}
-              onClick={() => { setSelected([]); setPage(page + 1) }}>下一页</button>
-          </div>
-        )}
-      </section>
-      <section className="card space-y-4 p-5" aria-labelledby="rvc-export">
-        <h2 className="text-lg font-semibold text-hi" id="rvc-export">导出 RVC 数据集</h2>
-        <p className="text-sm text-lo">导出已保留的片段。格式为单声道 16-bit PCM WAV。</p>
-        <div className="flex flex-wrap items-end gap-3">
-          <label className="text-sm text-mid">采样率
-            <select className="input-field mt-1 block" value={sampleRate} onChange={e => setSampleRate(Number(e.target.value))}>
-              {RATES.map(rate => <option key={rate} value={rate}>{rate} Hz</option>)}
-            </select>
-          </label>
-          <button className="btn btn-primary" disabled={busy || !details.data?.review.kept?.count} onClick={exportProject}>导出已保留片段</button>
-        </div>
-        {output && (
-          <div className="space-y-2 text-sm text-mid">
-            <p>已导出 {output.count} 段 · {timestamp(output.duration_seconds)}</p>
-            <p className="break-all">{output.directory}</p>
-            <a className="btn btn-secondary" href={API_URL + output.download_url}>下载 ZIP</a>
+              onClick={() => setPage(page + 1)}>下一页</button>
           </div>
         )}
       </section>

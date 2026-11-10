@@ -96,6 +96,7 @@ class ReviewInput(BaseModel):
 
 class ExportInput(BaseModel):
     sample_rate: SampleRate = 40000
+    clip_ids: list[Identifier] | None = Field(None, min_length=1, max_length=1000)
 
 
 def get_project(db: Session, project_id: str) -> RvcProject:
@@ -346,11 +347,15 @@ def review_clips(project_id: Identifier, data: ReviewInput, db: DB):
 @router.post("/projects/{project_id}/export")
 def export_project(project_id: Identifier, data: ExportInput, db: DB):
     project = project_data(get_project(db, project_id))
+    selected = set(data.clip_ids) if data.clip_ids is not None else None
+    selection = RvcClip.review == "kept" if selected is None else RvcClip.id.in_(selected)
     rows = db.execute(
         select(RvcClip, RvcSource).join(RvcSource)
-        .where(RvcClip.project_id == project_id, RvcClip.review == "kept")
+        .where(RvcClip.project_id == project_id, selection)
         .order_by(RvcSource.created_at, RvcClip.start, RvcClip.id)
-    )
+    ).all()
+    if selected is not None and len(rows) != len(selected):
+        raise HTTPException(400, "部分所选片段已不存在或不属于此项目，请重新选择。")
     entries = [
         {"clip": clip_data(clip, source), "source": source_data(source), "path": clip_path(clip)}
         for clip, source in rows
@@ -370,4 +375,4 @@ def download_export(project_id: Identifier, export_id: Identifier, db: DB):
     path = export_root(project_id) / export_id / "dataset.zip"
     if not path.is_file():
         raise HTTPException(404, "数据集导出不存在。")
-    return FileResponse(path, media_type="application/zip", filename=f"rvc-{project_id[:8]}.zip")
+    return FileResponse(path, media_type="application/zip", filename=f"rvc-{project_id[:8]}-{export_id[:8]}.zip")
