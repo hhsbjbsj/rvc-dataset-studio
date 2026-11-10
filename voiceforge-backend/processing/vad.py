@@ -17,7 +17,8 @@ def get_speech_segments(
 ) -> list[dict[str, float]]:
     """Detect speech segments using Silero VAD."""
     try:
-        return _silero_vad(audio_path, sample_rate, min_speech_ms, min_silence_ms, threshold)
+        vad_rate = sample_rate if sample_rate in (8000, 16000) else 16000
+        return _silero_vad(audio_path, vad_rate, min_speech_ms, min_silence_ms, threshold)
     except Exception as e:
         logger.warning("Silero VAD failed, falling back to webrtcvad: %s", e)
         return _webrtc_vad(audio_path, sample_rate)
@@ -71,7 +72,7 @@ def _webrtc_vad(audio_path: Path, sample_rate: int) -> list[dict[str, float]]:
     in_speech = False
     start = 0.0
 
-    for i in range(0, len(pcm) - frame_size, frame_size):
+    for i in range(0, len(pcm) - frame_size + 1, frame_size):
         frame = pcm[i : i + frame_size].tobytes()
         is_speech = vad.is_speech(frame, sr)
         t = i / sr

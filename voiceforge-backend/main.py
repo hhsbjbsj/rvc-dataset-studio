@@ -1,6 +1,8 @@
 """FastAPI application entry point."""
 
+import asyncio
 import logging
+import shutil
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -14,6 +16,8 @@ from api.routes_convert import router as convert_router
 from api.routes_search import router as search_router
 from api.routes_history import router as history_router
 from api.websocket import router as ws_router
+from api.routes_rvc import router as rvc_router
+from workers.rvc_worker import RvcWorker
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,9 +31,15 @@ settings = get_settings()
 async def lifespan(app: FastAPI):
     init_db()
     settings.ensure_dirs()
+    worker = RvcWorker()
+    app.state.rvc_worker = worker
+    worker.start()
     logger.info("VoiceForge Dataset Studio started")
-    yield
-    logger.info("VoiceForge shutting down")
+    try:
+        yield
+    finally:
+        await asyncio.to_thread(worker.stop)
+        logger.info("VoiceForge shutting down")
 
 
 app = FastAPI(
@@ -55,6 +65,7 @@ app.include_router(convert_router)
 app.include_router(search_router)
 app.include_router(history_router)
 app.include_router(ws_router)
+app.include_router(rvc_router)
 
 # Serve packaged outputs from wherever OUTPUT_DIR points (it may live outside the repo).
 settings.ensure_dirs()
@@ -68,14 +79,25 @@ def health_check():
 
 @app.get("/api/health")
 def api_health():
-    return {"status": "ok", "redis": _check_redis()}
+    return {
+        "status": "ok", "redis": _check_redis(),
+        "rvc": "ready" if shutil.which("ffmpeg") and shutil.which("ffprobe") else "missing_ffmpeg",
+    }
 
 
 def _check_redis() -> str:
     try:
-        from workers.celery_app import redis_client
+        from redis import Redis
+        from redis.backoff import NoBackoff
+        from redis.retry import Retry
 
-        redis_client.ping()
+        with Redis.from_url(
+            settings.REDIS_URL,
+            socket_connect_timeout=0.4,
+            socket_timeout=0.4,
+            retry=Retry(NoBackoff(), 0),
+        ) as client:
+            client.ping()
         return "connected"
     except Exception:
         return "disconnected"

@@ -22,7 +22,7 @@ async def resolve_character(
         "query_type": query_type,
     }
 
-    if query_type in ("anime", "fictional", "game_character"):
+    if query_type in ("anime", "fictional"):
         # Try MAL/Jikan first
         try:
             from resolvers.myanimelist import search_character

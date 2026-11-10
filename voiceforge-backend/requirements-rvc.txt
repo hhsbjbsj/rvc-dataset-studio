@@ -1,0 +1,17 @@
+# CPU-only RVC project workflow and shared API/UI dependencies.
+fastapi>=0.111
+uvicorn[standard]>=0.29
+celery[redis]>=5.3.6
+sqlalchemy>=2.0.30
+pydantic-settings>=2.2.1
+python-multipart>=0.0.9
+yt-dlp>=2025.1.26
+webrtcvad-wheels>=2.0.14
+numpy>=1.26.4,<3
+soundfile>=0.12.1
+scipy>=1.13
+pyarrow>=17
+aiohttp>=3.9.5
+beautifulsoup4>=4.12.3
+httpx>=0.27
+pytest>=8.2

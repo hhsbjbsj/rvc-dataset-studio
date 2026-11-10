@@ -39,7 +39,11 @@ async def search_all_sources(
                 sources.append({"type": "youtube", "url": r["url"], "title": r["title"], "duration": r["duration"]})
 
     # Bilibili
-    if query_type in ("anime", "fictional") and "bilibili" in options.get("video_sources", []):
+    if (
+        strategy_pref in ("auto", "scrape_only", "hybrid")
+        and query_type in ("anime", "fictional", "game_character")
+        and "bilibili" in options.get("video_sources", [])
+    ):
         bili_results = await search_bilibili(query, character_info)
         for r in bili_results[:15]:
             sources.append({"type": "bilibili", "url": r.get("url", ""), "title": r.get("title", "")})

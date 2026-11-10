@@ -1,0 +1,373 @@
+"""Loopback-only HTTP endpoints for mixed-source RVC projects."""
+
+import os
+import stat
+from pathlib import Path
+from threading import Lock
+from typing import Annotated, Literal
+from urllib.parse import urlsplit
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field, StringConstraints, model_validator
+from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from database import get_db
+from processing.rvc_audio import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS, MediaError, probe
+from processing.rvc_export import export_dataset
+from rvc_projects import (
+    RvcClip, RvcProject, RvcSource, clip_data, clip_path, export_root, project_data, source_data,
+)
+from sources.rvc_online import normalize_url, search_bilibili_page
+from workers.rvc_worker import update_source
+
+LOOPBACK = {"127.0.0.1", "::1", "localhost"}
+AVAILABLE = ("ready", "failed", "cancelled")
+SourceKind = Literal["local_video", "local_audio"]
+SampleRate = Literal[16000, 22050, 24000, 32000, 40000, 44100, 48000]
+Identifier = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]
+Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)]
+picker_lock = Lock()
+
+
+def require_local(request: Request) -> None:
+    origin = request.headers.get("origin")
+    if request.url.hostname not in LOOPBACK or (origin is not None and urlsplit(origin).hostname not in LOOPBACK):
+        raise HTTPException(403, "RVC 项目仅可从本机访问。")
+
+
+router = APIRouter(prefix="/api/rvc", tags=["RVC projects"], dependencies=[Depends(require_local)])
+DB = Annotated[Session, Depends(get_db)]
+
+
+class ProjectInput(BaseModel):
+    series: Name
+    character: Name
+    language: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=40)]
+    target_minutes: float = Field(20, gt=0, le=1440)
+
+
+class LocalImport(BaseModel):
+    kind: SourceKind
+    paths: list[Annotated[str, StringConstraints(min_length=1, max_length=32767)]] = Field(min_length=1, max_length=1000)
+    recursive: bool = False
+
+
+class PickerInput(BaseModel):
+    kind: SourceKind
+    folder: bool = False
+
+
+class OnlineVideo(BaseModel):
+    url: str = Field(max_length=2048)
+    title: str = Field("", max_length=500)
+    uploader: str = Field("", max_length=300)
+    duration: float = Field(0, ge=0, le=1_000_000)
+
+
+class OnlineImport(BaseModel):
+    videos: list[OnlineVideo] = Field(min_length=1, max_length=100)
+
+
+class TrackInput(BaseModel):
+    index: int = Field(ge=0)
+
+
+class ProcessInput(BaseModel):
+    source_ids: list[Identifier] | None = Field(None, max_length=1000)
+    split: bool = True
+    min_seconds: float = Field(1.5, ge=0.15, le=60)
+    max_seconds: float = Field(15, ge=0.3, le=120)
+    normalize: bool = False
+
+    @model_validator(mode="after")
+    def validate_bounds(self):
+        if self.min_seconds > self.max_seconds:
+            raise ValueError("最短片段时长不能超过最长时长。")
+        return self
+
+
+class ReviewInput(BaseModel):
+    ids: list[Identifier] | None = Field(None, min_length=1, max_length=1000)
+    review: Literal["kept", "excluded", "pending"]
+
+
+class ExportInput(BaseModel):
+    sample_rate: SampleRate = 40000
+
+
+def get_project(db: Session, project_id: str) -> RvcProject:
+    project = db.get(RvcProject, project_id)
+    if project is None:
+        raise HTTPException(404, "角色项目不存在。")
+    return project
+
+
+def get_source(db: Session, project_id: str, source_id: str) -> RvcSource:
+    source = db.get(RvcSource, source_id)
+    if source is None or source.project_id != project_id:
+        raise HTTPException(404, "素材不存在。")
+    return source
+
+
+def add_source(db: Session, **fields) -> bool:
+    try:
+        with db.begin_nested():
+            db.add(RvcSource(**fields))
+            db.flush()
+        return True
+    except IntegrityError:
+        return False
+
+
+@router.get("/projects")
+def projects(db: DB):
+    return [project_data(row) for row in db.scalars(select(RvcProject).order_by(RvcProject.created_at.desc()))]
+
+
+@router.post("/projects", status_code=201)
+def create_project(data: ProjectInput, db: DB):
+    project = RvcProject(**data.model_dump())
+    db.add(project)
+    db.commit()
+    return project_data(project)
+
+
+@router.get("/projects/{project_id}")
+def project_details(project_id: Identifier, db: DB):
+    project = get_project(db, project_id)
+    sources = db.scalars(select(RvcSource).where(RvcSource.project_id == project_id).order_by(RvcSource.created_at)).all()
+    stats = db.execute(
+        select(RvcClip.review, func.count(), func.sum(RvcClip.duration))
+        .where(RvcClip.project_id == project_id).group_by(RvcClip.review)
+    ).all()
+    return {
+        **project_data(project), "sources": [source_data(source) for source in sources],
+        "review": {review: {"count": count, "seconds": round(seconds, 2)} for review, count, seconds in stats},
+    }
+
+
+@router.post("/picker")
+def choose_paths(data: PickerInput):
+    import tkinter as tk
+    from tkinter import filedialog
+
+    if os.name != "nt":
+        raise HTTPException(400, "系统文件对话框只在 Windows 上启用，请直接填写路径。")
+    if not picker_lock.acquire(blocking=False):
+        raise HTTPException(409, "文件选择对话框已经打开。")
+    root = None
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        if data.folder:
+            selected = filedialog.askdirectory(parent=root, mustexist=True, title="选择包含素材的文件夹")
+            return {"paths": [selected] if selected else []}
+        extensions = VIDEO_EXTENSIONS if data.kind == "local_video" else AUDIO_EXTENSIONS
+        filetypes = [("Media", " ".join("*" + ext for ext in sorted(extensions))), ("All files", "*.*")]
+        return {"paths": list(filedialog.askopenfilenames(parent=root, title="选择本地媒体素材", filetypes=filetypes))}
+    except tk.TclError as exc:
+        raise HTTPException(400, "无法打开系统文件对话框，请直接填写完整路径。") from exc
+    finally:
+        if root is not None:
+            root.destroy()
+        picker_lock.release()
+
+
+def local_paths(values: list[str], extensions: set[str], recursive: bool, errors: list[dict]):
+    def on_error(exc):
+        errors.append({"origin": exc.filename or "", "error": str(exc)})
+
+    for value in values:
+        try:
+            path = Path(value.strip().strip('"'))
+            if not path.is_absolute():
+                raise ValueError("请填写绝对路径。")
+            path = path.resolve(strict=True)
+            if os.name == "nt" and path.drive.startswith(chr(92) * 2) and not path.drive.startswith(chr(92) * 2 + "?"):
+                raise ValueError("请选择本机磁盘上的文件。")
+            if path.is_file():
+                if path.suffix.lower() not in extensions:
+                    raise ValueError("当前入口不支持此文件扩展名。")
+                yield path
+                continue
+            if not path.is_dir():
+                raise ValueError("路径不是可读的文件或文件夹。")
+            for directory, subdirs, files in os.walk(path, followlinks=False, onerror=on_error):
+                parent = Path(directory)
+                if not recursive:
+                    subdirs.clear()
+                elif os.name == "nt":
+                    for name in subdirs[:]:
+                        try:
+                            attrs = getattr((parent / name).lstat(), "st_file_attributes", 0)
+                            if attrs & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                                subdirs.remove(name)
+                        except OSError:
+                            subdirs.remove(name)
+                for name in sorted(files):
+                    candidate = parent / name
+                    if candidate.suffix.lower() in extensions and not candidate.is_symlink() and candidate.is_file():
+                        yield candidate
+        except (OSError, ValueError) as exc:
+            errors.append({"origin": value, "error": str(exc)})
+
+
+@router.post("/projects/{project_id}/sources/local")
+def import_local(project_id: Identifier, data: LocalImport, db: DB):
+    get_project(db, project_id)
+    extensions = VIDEO_EXTENSIONS if data.kind == "local_video" else AUDIO_EXTENSIONS
+    errors = []
+    staged = {}
+    duplicate = 0
+    existing = set(db.scalars(select(RvcSource.source_key).where(RvcSource.project_id == project_id)))
+    for index, path in enumerate(local_paths(data.paths, extensions, data.recursive, errors)):
+        if index >= 1000:
+            errors.append({"origin": str(path), "error": "一次最多扫描 1000 个素材文件。"})
+            break
+        key = os.path.normcase(str(path))
+        if key in existing or key in staged:
+            duplicate += 1
+            continue
+        try:
+            media = probe(path)
+            if (data.kind == "local_video") != media["has_video"]:
+                raise MediaError("媒体类型与导入入口不匹配。")
+            staged[key] = (path, media)
+        except (MediaError, OSError) as exc:
+            errors.append({"origin": str(path), "error": str(exc)})
+    added = 0
+    for key, (path, media) in staged.items():
+        added += add_source(db, project_id=project_id, kind=data.kind, source_key=key, origin=str(path),
+                            title=path.name, media=media, track_index=media["default_track"])
+    db.commit()
+    return {"added": added, "duplicates": duplicate + len(staged) - added, "errors": errors}
+
+
+@router.get("/search/bilibili")
+def search_bilibili(q: Annotated[str, Query(min_length=1, max_length=250)], page: Annotated[int, Query(ge=1, le=100)] = 1):
+    try:
+        return search_bilibili_page(q.strip(), page)
+    except MediaError as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
+@router.post("/projects/{project_id}/sources/online")
+def import_online(project_id: Identifier, data: OnlineImport, db: DB):
+    get_project(db, project_id)
+    errors = []
+    added = 0
+    for video in data.videos:
+        try:
+            platform, url = normalize_url(video.url)
+        except ValueError as exc:
+            errors.append({"origin": video.url, "error": str(exc)})
+            continue
+        added += add_source(db, project_id=project_id, kind=platform, source_key=url, origin=url,
+                            title=video.title or url, uploader=video.uploader, media={"duration": video.duration})
+    db.commit()
+    return {"added": added, "duplicates": len(data.videos) - len(errors) - added, "errors": errors}
+
+
+@router.patch("/projects/{project_id}/sources/{source_id}/track")
+def choose_track(project_id: Identifier, source_id: Identifier, data: TrackInput, db: DB):
+    source = get_source(db, project_id, source_id)
+    if data.index not in {track["index"] for track in source.media.get("tracks", [])}:
+        raise HTTPException(400, "选定音轨不存在。")
+    if not update_source(db, source_id, AVAILABLE, track_index=data.index):
+        raise HTTPException(409, "仅能为尚未成功处理的素材选择音轨。")
+    db.commit()
+    return {"track_index": data.index}
+
+
+@router.post("/projects/{project_id}/process", status_code=202)
+def process_project(project_id: Identifier, data: ProcessInput, request: Request, db: DB):
+    get_project(db, project_id)
+    filters = [RvcSource.project_id == project_id, RvcSource.status.in_(AVAILABLE)]
+    if data.source_ids is not None:
+        filters.append(RvcSource.id.in_(data.source_ids))
+    candidates = db.scalars(select(RvcSource.id).where(*filters).order_by(RvcSource.created_at)).all()
+    options = data.model_dump(exclude={"source_ids"})
+    queued = [
+        source_id for source_id in candidates
+        if update_source(db, source_id, AVAILABLE, status="queued", stage="queued", progress=0, error="", options=options)
+    ]
+    db.commit()
+    request.app.state.rvc_worker.submit(queued)
+    return {"queued": len(queued)}
+
+
+@router.post("/projects/{project_id}/sources/{source_id}/cancel")
+def cancel_source(project_id: Identifier, source_id: Identifier, db: DB):
+    get_source(db, project_id, source_id)
+    if update_source(db, source_id, ("queued",), status="cancelled", stage="", progress=0):
+        status = "cancelled"
+    elif update_source(db, source_id, ("running",), status="cancelling"):
+        status = "cancelling"
+    else:
+        raise HTTPException(409, "该素材当前无法取消。")
+    db.commit()
+    return {"status": status}
+
+
+@router.get("/projects/{project_id}/clips")
+def clips(project_id: Identifier, db: DB, page: Annotated[int, Query(ge=1)] = 1):
+    get_project(db, project_id)
+    filtered = select(RvcClip, RvcSource).join(RvcSource).where(RvcClip.project_id == project_id)
+    rows = db.execute(filtered.order_by(RvcSource.created_at, RvcClip.start, RvcClip.id).limit(100).offset((page - 1) * 100))
+    total = db.scalar(select(func.count()).select_from(RvcClip).where(RvcClip.project_id == project_id))
+    return {"clips": [clip_data(clip, source) for clip, source in rows], "total": total}
+
+
+@router.get("/projects/{project_id}/clips/{clip_id}/audio")
+def clip_audio(project_id: Identifier, clip_id: Identifier, db: DB):
+    clip = db.get(RvcClip, clip_id)
+    if clip is None or clip.project_id != project_id or not clip_path(clip).is_file():
+        raise HTTPException(404, "片段文件不存在。")
+    return FileResponse(clip_path(clip), media_type="audio/wav")
+
+
+@router.patch("/projects/{project_id}/clips/review")
+def review_clips(project_id: Identifier, data: ReviewInput, db: DB):
+    get_project(db, project_id)
+    filters = [RvcClip.project_id == project_id]
+    if data.ids is None:
+        filters.append(RvcClip.review == "pending")
+    else:
+        filters.append(RvcClip.id.in_(data.ids))
+    result = db.execute(update(RvcClip).where(*filters).values(review=data.review))
+    db.commit()
+    return {"updated": result.rowcount}
+
+
+@router.post("/projects/{project_id}/export")
+def export_project(project_id: Identifier, data: ExportInput, db: DB):
+    project = project_data(get_project(db, project_id))
+    rows = db.execute(
+        select(RvcClip, RvcSource).join(RvcSource)
+        .where(RvcClip.project_id == project_id, RvcClip.review == "kept")
+        .order_by(RvcSource.created_at, RvcClip.start, RvcClip.id)
+    )
+    entries = [
+        {"clip": clip_data(clip, source), "source": source_data(source), "path": clip_path(clip)}
+        for clip, source in rows
+    ]
+    db.close()
+    try:
+        result = export_dataset(project, entries, data.sample_rate)
+    except MediaError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    result["download_url"] = f"/api/rvc/projects/{project_id}/exports/{result['export_id']}"
+    return result
+
+
+@router.get("/projects/{project_id}/exports/{export_id}")
+def download_export(project_id: Identifier, export_id: Identifier, db: DB):
+    get_project(db, project_id)
+    path = export_root(project_id) / export_id / "dataset.zip"
+    if not path.is_file():
+        raise HTTPException(404, "数据集导出不存在。")
+    return FileResponse(path, media_type="application/zip", filename=f"rvc-{project_id[:8]}.zip")
