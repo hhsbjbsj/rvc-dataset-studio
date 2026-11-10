@@ -4,7 +4,7 @@ import hashlib
 import logging
 import os
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from threading import Lock
 
@@ -217,28 +217,44 @@ def restore_buffer_audio(clip: RvcClip) -> None:
         os.replace(staged, path)
 
 
-def delete_buffered_clip(db: Session, clip: RvcClip, entry: RvcMergeBuffer) -> None:
-    path = clip_path(clip)
-    staged = path.with_suffix(".deleting")
+def delete_buffered_clips(db: Session, rows: Sequence[tuple[RvcClip, RvcMergeBuffer]]) -> None:
+    if not rows:
+        return
+    paths = [clip_path(clip) for clip, _ in rows]
+    moved = []
     try:
-        if path.is_file():
-            os.replace(path, staged)
-    except OSError as exc:
-        raise MediaError("暂时无法移除音频文件，请暂停试听后重试。") from exc
-
-    try:
-        db.delete(entry)
+        for path in paths:
+            if path.is_file():
+                staged = path.with_suffix(".deleting")
+                try:
+                    os.replace(path, staged)
+                except OSError as exc:
+                    raise MediaError("暂时无法移除音频文件，请暂停试听后重试。") from exc
+                moved.append((path, staged))
+        for _, entry in rows:
+            db.delete(entry)
         db.flush()
-        db.delete(clip)
+        for clip, _ in rows:
+            db.delete(clip)
         db.commit()
     except Exception:
         db.rollback()
-        restore_buffer_audio(clip)
+        for path, staged in reversed(moved):
+            try:
+                os.replace(staged, path)
+            except OSError:
+                logger.warning("Could not restore staged audio file %s", staged, exc_info=True)
         raise
 
-    try:
-        staged.unlink(missing_ok=True)
-        if path.parent.is_dir() and not any(path.parent.iterdir()):
-            path.parent.rmdir()
-    except OSError:
-        logger.warning("Could not clean up staged audio file %s", staged, exc_info=True)
+    for path in paths:
+        staged = path.with_suffix(".deleting")
+        try:
+            staged.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Could not clean up staged audio file %s", staged, exc_info=True)
+    for directory in {path.parent for path in paths}:
+        try:
+            if directory.is_dir() and not any(directory.iterdir()):
+                directory.rmdir()
+        except OSError:
+            logger.warning("Could not clean up audio directory %s", directory, exc_info=True)

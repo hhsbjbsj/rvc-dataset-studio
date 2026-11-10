@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from database import get_db
 from processing.rvc_audio import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS, MediaError, probe
 from processing.rvc_edit import (
-    create_edit, create_edits, delete_buffered_clip, restore_buffer_audio, source_audio_info, source_audio_path, waveform_peaks,
+    create_edit, create_edits, delete_buffered_clips, restore_buffer_audio, source_audio_info, source_audio_path, waveform_peaks,
 )
 from processing.rvc_export import export_dataset
 from rvc_projects import (
@@ -110,6 +110,10 @@ class ClipRanges(BaseModel):
 
 class MergeInput(BaseModel):
     clip_ids: list[Identifier] = Field(min_length=2, max_length=1000)
+
+
+class ClearBufferInput(BaseModel):
+    clip_ids: list[Identifier] = Field(min_length=1)
 
 
 class ExportInput(BaseModel):
@@ -427,6 +431,23 @@ def merge_buffer(project_id: Identifier, db: DB):
     return {"clips": [clip_data(clip, source) for clip, source in rows]}
 
 
+@router.delete("/projects/{project_id}/merge-buffer")
+def clear_merge_buffer(project_id: Identifier, data: ClearBufferInput, db: DB):
+    with clip_file_lock:
+        get_project(db, project_id)
+        confirmed = set(data.clip_ids)
+        buffered = db.execute(
+            select(RvcClip, RvcMergeBuffer).join(RvcMergeBuffer)
+            .where(RvcClip.project_id == project_id)
+        )
+        rows = [(clip, entry) for clip, entry in buffered if clip.id in confirmed]
+        try:
+            delete_buffered_clips(db, rows)
+        except MediaError as exc:
+            raise HTTPException(409, str(exc)) from exc
+    return {"deleted": len(rows)}
+
+
 def get_buffer_entry(db: Session, project_id: str, clip_id: str) -> tuple[RvcClip, RvcMergeBuffer]:
     row = db.execute(
         select(RvcClip, RvcMergeBuffer).join(RvcMergeBuffer)
@@ -453,7 +474,7 @@ def delete_merged_clip(project_id: Identifier, clip_id: Identifier, db: DB):
     with clip_file_lock:
         clip, entry = get_buffer_entry(db, project_id, clip_id)
         try:
-            delete_buffered_clip(db, clip, entry)
+            delete_buffered_clips(db, [(clip, entry)])
         except MediaError as exc:
             raise HTTPException(409, str(exc)) from exc
     return {"id": clip_id}

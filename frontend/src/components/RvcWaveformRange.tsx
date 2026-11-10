@@ -10,6 +10,7 @@ type WaveRange = { id: string; start: number; end: number; label: string }
 type Props = {
   path: string
   player: RefObject<HTMLAudioElement>
+  container: RefObject<HTMLDivElement>
   duration: number
   offset: number
   ranges: WaveRange[]
@@ -25,8 +26,7 @@ const inactiveColor = 'rgba(124, 140, 255, 0.20)'
 const activeColor = 'rgba(124, 140, 255, 0.40)'
 const regionOptions = { drag: false, contentEditable: false, color: inactiveColor }
 
-export function RvcWaveformRange({ path, player, duration, offset, ranges, activeId, busy, canDraw, onChange, onSelect, onSeek }: Props) {
-  const container = useRef<HTMLDivElement>(null)
+export function RvcWaveformRange({ path, player, container, duration, offset, ranges, activeId, busy, canDraw, onChange, onSelect, onSeek }: Props) {
   const instance = useRef<WaveSurfer | null>(null)
   const regionsRef = useRef<Regions | null>(null)
   const syncing = useRef(false)
@@ -80,7 +80,7 @@ export function RvcWaveformRange({ path, player, duration, offset, ranges, activ
       regionsRef.current = null
       instance.current = null
     }
-  }, [duration, offset, onChange, onSeek, player, waveform.data])
+  }, [container, duration, offset, onChange, onSeek, player, waveform.data])
 
   useEffect(() => {
     const plugin = regionsRef.current
@@ -114,7 +114,7 @@ export function RvcWaveformRange({ path, player, duration, offset, ranges, activ
     const wave = instance.current
     const width = container.current?.clientWidth
     if (ready && wave?.getDecodedData() && width && duration) wave.zoom(zoom === 1 ? 0 : width * zoom / duration)
-  }, [duration, ready, zoom])
+  }, [container, duration, ready, zoom])
 
   function selectRegion(event: MouseEvent<HTMLDivElement>) {
     const wave = instance.current
@@ -137,11 +137,10 @@ export function RvcWaveformRange({ path, player, duration, offset, ranges, activ
     if (busy || !ranges.length || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.nativeEvent.isComposing) return
     if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return
     event.preventDefault()
-    const ordered = [...ranges].sort((a, b) => a.start - b.start || a.end - b.end)
-    const index = ordered.findIndex(range => range.id === activeId)
+    const index = ranges.findIndex(range => range.id === activeId)
     const previous = event.key === 'ArrowUp'
-    const nextIndex = previous && index < 0 ? ordered.length - 1 : index + (previous ? -1 : 1)
-    const next = ordered[nextIndex]
+    const nextIndex = previous && index < 0 ? ranges.length - 1 : index + (previous ? -1 : 1)
+    const next = ranges[nextIndex]
     if (!next) return
     onSelect(next.id)
 
@@ -165,7 +164,7 @@ export function RvcWaveformRange({ path, player, duration, offset, ranges, activ
       </div>
       <div className={'rvc-waveform min-h-24 rounded-md border border-white/10 bg-black/5 px-2 pt-2' + (busy ? ' pointer-events-none' : '')}
         role="group" aria-label="音频波形和截取选区" aria-disabled={busy}
-        aria-keyshortcuts="Space ArrowUp ArrowDown ArrowLeft ArrowRight Shift+ArrowLeft Shift+ArrowRight Control+S"
+        aria-keyshortcuts="Space ArrowUp ArrowDown ArrowLeft ArrowRight Shift+ArrowLeft Shift+ArrowRight Delete Control+S"
         tabIndex={busy ? -1 : 0} ref={container} onClickCapture={selectRegion} onKeyDown={navigateRegions} />
       {(waveform.isError || renderError) && <p role="alert" className="text-xs text-mid">波形加载失败，可以继续用起点和终点输入框截取。</p>}
       {!ready && !waveform.isError && !renderError && <p className="text-xs text-lo">正在加载波形…</p>}

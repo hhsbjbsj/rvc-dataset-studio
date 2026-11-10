@@ -40,6 +40,7 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
   const [loopingId, setLoopingId] = useState<string>()
   const [playing, setPlaying] = useState(false)
   const player = useRef<HTMLAudioElement>(null)
+  const waveform = useRef<HTMLDivElement>(null)
   const preview = useRef<RangePreview | null>(null)
   const active = drafts.find(draft => draft.id === activeId) ?? drafts[0]
   const waveRanges = useMemo(() => drafts.flatMap((draft, index) => {
@@ -47,7 +48,7 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
     const end = Number(draft.end)
     if (!draft.start || !draft.end || start < offset || end > limit || end <= start) return []
     return [{ id: draft.id, start: start - offset, end: end - offset, label: String(index + 1) }]
-  }), [drafts, limit, offset])
+  }).sort((a, b) => a.start - b.start || a.end - b.end), [drafts, limit, offset])
 
   const updateWaveRange = useCallback((id: string, left: number, right: number) => {
     const start = left === 0 ? offset : Math.max(offset, Number((left + offset).toFixed(3)))
@@ -136,6 +137,16 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
     setDrafts(previous => previous.map(draft => draft.id === active?.id ? { ...draft, [field]: value } : draft))
   }
 
+  function removeDraft(id: string) {
+    if (id === active?.id) {
+      const index = waveRanges.findIndex(range => range.id === id)
+      const neighbor = waveRanges[index + 1] ?? waveRanges[index - 1]
+      setActiveId(neighbor?.id)
+    }
+    if (preview.current?.id === id) stopPreview()
+    setDrafts(previous => previous.filter(draft => draft.id !== id))
+  }
+
   function handleEditorKeys(event: KeyboardEvent<HTMLDivElement>) {
     if (event.nativeEvent.isComposing) return
     if (event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey && event.key.toLowerCase() === 's') {
@@ -146,6 +157,15 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
     if (!active || busy || event.altKey || event.ctrlKey || event.metaKey) return
     const target = event.target
     if (!(target instanceof HTMLElement) || target.closest('select, textarea, audio, [contenteditable="true"]')) return
+
+    if (event.key === 'Delete' && !event.shiftKey && !(target instanceof HTMLInputElement)) {
+      event.preventDefault()
+      if (!event.repeat) {
+        removeDraft(active.id)
+        waveform.current?.focus({ preventScroll: true })
+      }
+      return
+    }
 
     const button = target.closest('button')
     if (event.key === ' ' && (!button || button.matches('[data-range-picker][aria-pressed="true"]'))) {
@@ -226,7 +246,7 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
 
   return (
     <div className="space-y-3" onKeyDown={handleEditorKeys}>
-      <RvcWaveformRange path={waveformPath} player={player} duration={duration} offset={offset}
+      <RvcWaveformRange path={waveformPath} player={player} container={waveform} duration={duration} offset={offset}
         ranges={waveRanges} activeId={active?.id} busy={busy} canDraw={drafts.length < MAX_RANGES}
         onChange={updateWaveRange} onSelect={setActiveId} onSeek={seekWaveform} />
       <audio ref={player} className="w-full" aria-label={fromClip ? '待截取片段' : '原音轨'} controls preload="metadata"
@@ -304,7 +324,7 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
                     onClick={stopPreview}>停止循环</button>
                 )}
                 <button className="btn btn-secondary btn-sm" aria-label={'移除选区 ' + number} disabled={busy}
-                  onClick={() => setDrafts(previous => previous.filter(item => item.id !== draft.id))}>移除</button>
+                  onClick={() => removeDraft(draft.id)}>移除</button>
                 {error && <span className="text-xs text-lo">{error}</span>}
               </li>
             )
@@ -340,7 +360,7 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
       </div>
       {hasDuplicates && <p className="text-xs text-lo">有重复的选区，请调整或移除后再保存。</p>}
       {drafts.length >= MAX_RANGES && <p className="text-xs text-lo">已达到单批 50 段的上限。</p>}
-      <p className="text-xs text-lo">确认后可按 Ctrl+S 保存全部选区，每段生成一个独立的原速 WAV。</p>
+      <p className="text-xs text-lo">Delete 移除当前选区。Ctrl+S 保存剩余选区，每段生成一个独立的原速 WAV。</p>
       {playbackError && <p role="alert" className="text-sm text-mid">{playbackError}</p>}
     </div>
   )

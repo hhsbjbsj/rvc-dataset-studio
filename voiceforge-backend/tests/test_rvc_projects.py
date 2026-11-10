@@ -372,6 +372,34 @@ def test_manual_edit_uses_the_source_timeline(client, speech, monkeypatch):
     assert client.post(source_base + "/clips", json={"start": 0, "end": info["duration"] + 0.2}).status_code == 400
     assert client.get(base).json()["review"]["pending"]["count"] == len(clips) + 1
 
+    confirmed = {"clip_ids": [merged["id"], third["id"], reused["id"]]}
+    with SessionLocal() as db:
+        buffered_paths = [clip_path(db.get(RvcClip, item["id"])) for item in (merged, third)]
+    replace_file = os.replace
+    staged_attempts = []
+
+    def fail_second_stage(source, destination):
+        if Path(destination).suffix == ".deleting":
+            staged_attempts.append(source)
+            if len(staged_attempts) == 2:
+                raise PermissionError("模拟第二段仍被占用")
+        return replace_file(source, destination)
+
+    with monkeypatch.context() as patch:
+        patch.setattr("processing.rvc_edit.os.replace", fail_second_stage)
+        response = client.request("DELETE", buffer_url, json=confirmed)
+        assert response.status_code == 409
+    assert {row["id"] for row in client.get(buffer_url).json()["clips"]} == {merged["id"], third["id"]}
+    assert all(path.is_file() and not path.with_suffix(".deleting").exists() for path in buffered_paths)
+
+    response = client.request("DELETE", buffer_url, json=confirmed)
+    assert response.status_code == 200 and response.json() == {"deleted": 2}
+    assert client.get(buffer_url).json()["clips"] == []
+    assert all(not path.exists() and not path.with_suffix(".deleting").exists() for path in buffered_paths)
+    assert clip_audio(merged).status_code == clip_audio(third).status_code == 404
+    assert clip_audio(reused).status_code == 200
+    assert client.request("DELETE", buffer_url, json=confirmed).json() == {"deleted": 0}
+
 
 def test_save_ranges_as_independent_wavs(client, speech, monkeypatch):
     _, source_file, _ = speech

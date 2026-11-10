@@ -65,7 +65,8 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
   const [trimResults, setTrimResults] = useState<Clip[]>([])
   const trimPanel = useRef<HTMLDivElement>(null)
   const [bufferOpen, setBufferOpen] = useState(false)
-  const [confirmDeleteId, setConfirmDeleteId] = useState<string>()
+  const [bufferDeletion, setBufferDeletion] = useState<string | string[]>()
+  const clearBufferIds = Array.isArray(bufferDeletion) ? bufferDeletion : undefined
   const details = useQuery({
     queryKey: ['rvc-project', id],
     queryFn: async () => (await api.get<ProjectDetails>(base)).data,
@@ -81,6 +82,7 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
     queryFn: async () => (await api.get<{ clips: Clip[] }>(base + '/merge-buffer')).data,
     enabled: bufferOpen,
   })
+  const bufferedClips = buffer.data?.clips ?? []
   const sources = details.data?.sources ?? []
   const revision = sources.map(source => source.id + ':' + source.status).join('|')
   useEffect(() => {
@@ -152,7 +154,15 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
       } else {
         await api.delete(path)
       }
-      setConfirmDeleteId(undefined)
+      setBufferDeletion(undefined)
+      await queryClient.invalidateQueries({ queryKey: bufferKey })
+    })
+  }
+
+  function clearMergeBuffer(clipIds: string[]) {
+    run('清空合并缓冲区', async () => {
+      await api.delete(base + '/merge-buffer', { data: { clip_ids: clipIds } })
+      setBufferDeletion(undefined)
       await queryClient.invalidateQueries({ queryKey: bufferKey })
     })
   }
@@ -295,7 +305,7 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
         )}
         <details className="hairline-b space-y-3 pb-4" onToggle={e => {
           setBufferOpen(e.currentTarget.open)
-          if (!e.currentTarget.open) setConfirmDeleteId(undefined)
+          if (!e.currentTarget.open) setBufferDeletion(undefined)
         }}>
           <summary className="cursor-pointer font-medium text-hi">
             合并缓冲区{buffer.data ? '（' + buffer.data.clips.length + ' 段）' : ''}
@@ -306,24 +316,37 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
               {buffer.isError && <p role="alert" className="text-sm text-mid">{message(buffer.error)}</p>}
               {buffer.isLoading && <p className="text-sm text-lo">正在加载缓冲区…</p>}
               {buffer.data?.clips.length === 0 && <p className="text-sm text-lo">缓冲区为空。</p>}
+              {clearBufferIds ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-sm text-mid">永久删除缓冲区中的 {clearBufferIds.length} 段旧音频？</span>
+                  <button className="btn btn-danger btn-sm" disabled={busy} onClick={event => {
+                    event.currentTarget.closest('details')?.querySelectorAll('audio').forEach(audio => audio.pause())
+                    clearMergeBuffer(clearBufferIds)
+                  }}>确认清空</button>
+                  <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => setBufferDeletion(undefined)}>取消</button>
+                </div>
+              ) : bufferedClips.length > 0 && (
+                <button className="btn btn-danger btn-sm" disabled={busy}
+                  onClick={() => setBufferDeletion(bufferedClips.map(clip => clip.id))}>清空缓冲区…</button>
+              )}
               <ul className="space-y-3">
-                {buffer.data?.clips.map(clip => (
+                {bufferedClips.map(clip => (
                   <li key={clip.id} className="hairline-b flex flex-wrap items-center gap-2 pb-2">
                     <p className="min-w-48 flex-1 break-all text-sm text-hi">
                       {clip.source_title} · {timestamp(clip.start)}–{timestamp(clip.end)}
                     </p>
-                    {confirmDeleteId === clip.id ? (
+                    {bufferDeletion === clip.id ? (
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="text-sm text-mid">永久删除这段音频？</span>
                         <button className="btn btn-danger btn-sm" disabled={busy} onClick={() => updateBufferedClip(clip.id, false)}>确认删除</button>
-                        <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => setConfirmDeleteId(undefined)}>取消</button>
+                        <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => setBufferDeletion(undefined)}>取消</button>
                       </div>
                     ) : (
                       <>
                         <audio className="h-9 max-w-full" controls preload="none" aria-label={'试听缓冲区片段 ' + timestamp(clip.start)}
                           src={API_URL + base + '/clips/' + clip.id + '/audio'} />
                         <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => updateBufferedClip(clip.id, true)}>恢复到列表</button>
-                        <button className="btn btn-danger btn-sm" disabled={busy} onClick={() => setConfirmDeleteId(clip.id)}>删除…</button>
+                        <button className="btn btn-danger btn-sm" disabled={busy} onClick={() => setBufferDeletion(clip.id)}>删除…</button>
                       </>
                     )}
                   </li>
