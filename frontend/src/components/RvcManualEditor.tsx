@@ -7,7 +7,7 @@ import { API_URL } from '@/lib/config'
 type AudioInfo = { duration: number; offset: number }
 export type AudioRange = { start: number; end: number }
 type Draft = { id: string; start: string; end: string }
-type RangePreview = AudioRange & { id: string; loop: boolean }
+type RangePreview = AudioRange & { id: string; loop: boolean; suspended: boolean }
 type SaveRanges = (ranges: AudioRange[], onSaved: () => void) => void
 const MAX_RANGES = 50
 const PREVIEW_RATES = [1, 0.75, 0.5, 0.25]
@@ -38,6 +38,7 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
   const [playbackRate, setPlaybackRate] = useState(1)
   const [playbackError, setPlaybackError] = useState('')
   const [loopingId, setLoopingId] = useState<string>()
+  const [playing, setPlaying] = useState(false)
   const player = useRef<HTMLAudioElement>(null)
   const preview = useRef<RangePreview | null>(null)
   const active = drafts.find(draft => draft.id === activeId) ?? drafts[0]
@@ -97,7 +98,7 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
 
   useEffect(() => {
     const audio = player.current
-    if (!loopingId || !audio) return
+    if (!loopingId || !playing || !audio) return
     // Check the loop boundary between the browser's periodic timeupdate events.
     let frame: number
     const tick = () => {
@@ -107,7 +108,7 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
     }
     frame = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(frame)
-  }, [keepPreviewInRange, loopingId])
+  }, [keepPreviewInRange, loopingId, playing])
 
   function rangeError(draft: Draft) {
     const start = Number(draft.start)
@@ -125,10 +126,16 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
     setDrafts(previous => previous.map(draft => draft.id === active?.id ? { ...draft, [field]: value } : draft))
   }
 
-  function nudgeRange(event: KeyboardEvent<HTMLDivElement>) {
+  function handleEditorKeys(event: KeyboardEvent<HTMLDivElement>) {
     if (!active || busy || event.altKey || event.ctrlKey || event.metaKey || event.nativeEvent.isComposing) return
     const target = event.target
     if (!(target instanceof HTMLElement) || target.closest('select, textarea, audio, [contenteditable="true"]')) return
+
+    if (event.key === ' ' && preview.current?.loop && !target.closest('button')) {
+      event.preventDefault()
+      if (!event.repeat) toggleLoopPlayback()
+      return
+    }
 
     let field: 'start' | 'end'
     let direction: number
@@ -162,10 +169,26 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
 
   function playPreview(audio: HTMLAudioElement, current: RangePreview) {
     void audio.play().catch(() => {
-      if (preview.current !== current) return
+      if (preview.current !== current || current.suspended) return
       clearPreview()
       setPlaybackError('暂时无法播放这段音频。')
     })
+  }
+
+  function toggleLoopPlayback() {
+    const current = preview.current
+    const audio = player.current
+    if (!current?.loop || !audio) return
+    if (!audio.paused) {
+      current.suspended = true
+      audio.pause()
+      return
+    }
+    current.suspended = false
+    if (audio.currentTime < current.start || audio.currentTime >= current.end || audio.ended) {
+      audio.currentTime = current.start
+    }
+    playPreview(audio, current)
   }
 
   function previewRange(draft: Draft, loop: boolean) {
@@ -173,7 +196,7 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
     if (!audio || rangeError(draft)) return
     setPlaybackError('')
     setActiveId(draft.id)
-    const current = { id: draft.id, start: Number(draft.start) - offset, end: Number(draft.end) - offset, loop }
+    const current = { id: draft.id, start: Number(draft.start) - offset, end: Number(draft.end) - offset, loop, suspended: false }
     preview.current = current
     setLoopingId(loop ? draft.id : undefined)
     audio.currentTime = current.start
@@ -181,10 +204,10 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
   }
 
   return (
-    <div className="space-y-3" onKeyDown={nudgeRange}>
+    <div className="space-y-3" onKeyDown={handleEditorKeys}>
       <RvcWaveformRange path={waveformPath} player={player} duration={duration} offset={offset}
         ranges={waveRanges} activeId={active?.id} busy={busy} canDraw={drafts.length < MAX_RANGES}
-        onChange={updateWaveRange} onSeek={seekWaveform} />
+        onChange={updateWaveRange} onSelect={setActiveId} onSeek={seekWaveform} />
       <audio ref={player} className="w-full" aria-label={fromClip ? '待截取片段' : '原音轨'} controls preload="metadata"
         src={audioUrl}
         onRateChange={event => setPlaybackRate(event.currentTarget.playbackRate)}
@@ -193,14 +216,26 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
           setPlaybackError('音频加载失败，请重新打开编辑。')
           onLoadError?.()
         }}
+        onPlay={event => {
+          if (event.currentTarget.paused) return
+          if (preview.current) preview.current.suspended = false
+          setPlaying(true)
+        }}
         onPause={event => {
           const audio = event.currentTarget
-          if (audio.paused && !(audio.ended && preview.current?.loop)) clearPreview()
+          if (!audio.paused) return
+          setPlaying(false)
+          const current = preview.current
+          if (current?.loop) {
+            if (!audio.ended) current.suspended = true
+          } else {
+            clearPreview()
+          }
         }}
         onEnded={event => {
           const audio = event.currentTarget
           const current = preview.current
-          if (!current?.loop || !audio.paused) return
+          if (!current?.loop || current.suspended || !audio.paused) return
           audio.currentTime = current.start
           playPreview(audio, current)
         }}
@@ -230,6 +265,7 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
             const number = index + 1
             const error = rangeError(draft)
             const looping = draft.id === loopingId
+            const loopAction = looping ? (playing ? '暂停循环' : '继续循环') : '循环试听'
             return (
               <li key={draft.id} className="flex flex-wrap items-center gap-2 rounded-md border border-white/10 p-2 text-sm text-mid">
                 <button className="btn btn-secondary btn-sm" aria-pressed={draft.id === active?.id} disabled={busy}
@@ -238,10 +274,14 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
                 <button className="btn btn-secondary btn-sm" aria-label={'试听选区 ' + number} disabled={busy || !!error}
                   onClick={() => previewRange(draft, false)}>试听</button>
                 <button className={looping ? 'btn btn-primary btn-sm' : 'btn btn-secondary btn-sm'}
-                  aria-label={(looping ? '停止循环选区 ' : '循环试听选区 ') + number} disabled={busy || (!looping && !!error)}
-                  onClick={() => looping ? stopPreview() : previewRange(draft, true)}>
-                  {looping ? '停止循环' : '循环试听'}
+                  aria-label={loopAction + '选区 ' + number} disabled={busy || (!looping && !!error)}
+                  onClick={() => looping ? toggleLoopPlayback() : previewRange(draft, true)}>
+                  {loopAction}
                 </button>
+                {looping && (
+                  <button className="btn btn-secondary btn-sm" aria-label={'停止循环选区 ' + number} disabled={busy}
+                    onClick={stopPreview}>停止循环</button>
+                )}
                 <button className="btn btn-secondary btn-sm" aria-label={'移除选区 ' + number} disabled={busy}
                   onClick={() => setDrafts(previous => previous.filter(item => item.id !== draft.id))}>移除</button>
                 {error && <span className="text-xs text-lo">{error}</span>}
@@ -263,7 +303,7 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
         <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => mark('end')}>标记终点</button>
       </div>}
       {active && <p className="text-xs text-lo">
-        编辑器内用 ← / → 调起点，Shift + ← / → 调终点。聚焦时间框后用 ↑ / ↓。每次 0.01 秒。
+        ← / → 调起点，Shift + ← / → 调终点，时间框用 ↑ / ↓，每次 0.01 秒。空格暂停或继续循环。
       </p>}
       <div className="flex flex-wrap items-center gap-2">
         <button className="btn btn-secondary btn-sm" disabled={busy || drafts.length >= MAX_RANGES} onClick={() => {

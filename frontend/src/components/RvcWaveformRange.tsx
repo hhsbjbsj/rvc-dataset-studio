@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type RefObject } from 'react'
+import { useEffect, useRef, useState, type MouseEvent, type RefObject } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import WaveSurfer from 'wavesurfer.js'
 import Regions, { type Region } from 'wavesurfer.js/dist/plugins/regions.esm.js'
@@ -17,6 +17,7 @@ type Props = {
   busy: boolean
   canDraw: boolean
   onChange: (id: string, start: number, end: number) => void
+  onSelect: (id: string) => void
   onSeek: () => void
 }
 
@@ -24,7 +25,7 @@ const inactiveColor = 'rgba(124, 140, 255, 0.20)'
 const activeColor = 'rgba(124, 140, 255, 0.40)'
 const regionOptions = { drag: false, contentEditable: false, color: inactiveColor }
 
-export function RvcWaveformRange({ path, player, duration, offset, ranges, activeId, busy, canDraw, onChange, onSeek }: Props) {
+export function RvcWaveformRange({ path, player, duration, offset, ranges, activeId, busy, canDraw, onChange, onSelect, onSeek }: Props) {
   const container = useRef<HTMLDivElement>(null)
   const instance = useRef<WaveSurfer | null>(null)
   const regionsRef = useRef<Regions | null>(null)
@@ -110,14 +111,32 @@ export function RvcWaveformRange({ path, player, duration, offset, ranges, activ
   }, [busy, canDraw, duration, ready])
 
   useEffect(() => {
+    const wave = instance.current
     const width = container.current?.clientWidth
-    if (ready && width && duration) instance.current?.zoom(zoom === 1 ? 0 : width * zoom / duration)
+    if (ready && wave?.getDecodedData() && width && duration) wave.zoom(zoom === 1 ? 0 : width * zoom / duration)
   }, [duration, ready, zoom])
+
+  function selectRegion(event: MouseEvent<HTMLDivElement>) {
+    const wave = instance.current
+    const wrapper = wave?.getWrapper()
+    const path = event.nativeEvent.composedPath()
+    if (busy || !wave || !wrapper || !path.includes(wrapper)) return
+    event.currentTarget.focus({ preventScroll: true })
+    const { left, width } = wrapper.getBoundingClientRect()
+    const time = (event.clientX - left) * wave.getDuration() / width
+    const regions = regionsRef.current?.getRegions() ?? []
+    const region = regions.find(item => item.element && path.includes(item.element))
+      ?? [...regions].reverse().find(item => time >= item.start && time <= item.end)
+    if (!region) return
+    // A click on a range selects it without moving the playback cursor.
+    event.stopPropagation()
+    onSelect(region.id)
+  }
 
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-xs text-lo">在波形上拖出多个选区，拖动各自的左右括号微调。点击波形可跳到对应位置。</p>
+        <p className="text-xs text-lo">拖出选区，点击选区可切换编辑目标，点击选区外的波形可跳到对应位置。</p>
         <label className="flex items-center gap-2 text-xs text-mid">波形缩放
           <select className="input-field" value={zoom} disabled={busy || !ready}
             onChange={e => setZoom(Number(e.target.value))}>
@@ -127,7 +146,8 @@ export function RvcWaveformRange({ path, player, duration, offset, ranges, activ
       </div>
       <div className={'rvc-waveform min-h-24 rounded-md border border-white/10 bg-black/5 px-2 pt-2' + (busy ? ' pointer-events-none' : '')}
         role="group" aria-label="音频波形和截取选区" aria-disabled={busy}
-        aria-keyshortcuts="ArrowLeft ArrowRight Shift+ArrowLeft Shift+ArrowRight" tabIndex={busy ? -1 : 0} ref={container} />
+        aria-keyshortcuts="Space ArrowLeft ArrowRight Shift+ArrowLeft Shift+ArrowRight"
+        tabIndex={busy ? -1 : 0} ref={container} onClickCapture={selectRegion} />
       {(waveform.isError || renderError) && <p role="alert" className="text-xs text-mid">波形加载失败，可以继续用起点和终点输入框截取。</p>}
       {!ready && !waveform.isError && !renderError && <p className="text-xs text-lo">正在加载波形…</p>}
     </div>
