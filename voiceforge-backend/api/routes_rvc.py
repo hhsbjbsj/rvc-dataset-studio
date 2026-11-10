@@ -16,7 +16,9 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from processing.rvc_audio import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS, MediaError, probe
-from processing.rvc_edit import create_edit, delete_buffered_clip, restore_buffer_audio, source_audio_info, source_audio_path, trim_clip, waveform_peaks
+from processing.rvc_edit import (
+    create_edit, create_edits, delete_buffered_clip, restore_buffer_audio, source_audio_info, source_audio_path, waveform_peaks,
+)
 from processing.rvc_export import export_dataset
 from rvc_projects import (
     RvcClip, RvcMergeBuffer, RvcProject, RvcSource, active_clip, clip_data, clip_path, export_root, project_data, source_data,
@@ -100,6 +102,10 @@ class ReviewInput(BaseModel):
 class ClipRange(BaseModel):
     start: float = Field(ge=0, allow_inf_nan=False)
     end: float = Field(gt=0, allow_inf_nan=False)
+
+
+class ClipRanges(BaseModel):
+    ranges: list[ClipRange] = Field(min_length=1, max_length=50)
 
 
 class MergeInput(BaseModel):
@@ -364,26 +370,31 @@ def source_waveform(project_id: Identifier, source_id: Identifier, db: DB):
 
 
 @router.post("/projects/{project_id}/sources/{source_id}/clips")
-def cut_clip(project_id: Identifier, source_id: Identifier, data: ClipRange, db: DB):
+def cut_clip(project_id: Identifier, source_id: Identifier, data: ClipRange | ClipRanges, db: DB):
     with clip_file_lock:
         source = get_editable_source(db, project_id, source_id)
-        try:
-            return create_edit(db, source, data.start, data.end, "cut")
-        except MediaError as exc:
-            raise HTTPException(400, str(exc)) from exc
+        return save_ranges(db, source, data)
 
 
 @router.post("/projects/{project_id}/clips/{clip_id}/trim")
-def trim_existing_clip(project_id: Identifier, clip_id: Identifier, data: ClipRange, db: DB):
+def trim_existing_clip(project_id: Identifier, clip_id: Identifier, data: ClipRange | ClipRanges, db: DB):
     with clip_file_lock:
         clip = db.scalar(select(RvcClip).where(RvcClip.project_id == project_id, RvcClip.id == clip_id, active_clip()))
         if clip is None:
             raise HTTPException(404, "请在审核列表中选择要截取的片段。")
         source = get_editable_source(db, project_id, clip.source_id)
-        try:
-            return trim_clip(db, source, clip, data.start, data.end)
-        except MediaError as exc:
-            raise HTTPException(400, str(exc)) from exc
+        return save_ranges(db, source, data, clip=clip)
+
+
+def save_ranges(db: DB, source: RvcSource, data: ClipRange | ClipRanges, *, clip: RvcClip | None = None):
+    ranges = data.ranges if isinstance(data, ClipRanges) else [data]
+    try:
+        results = create_edits(
+            db, source, [(item.start, item.end) for item in ranges], "cut" if clip is None else "trim", clip=clip,
+        )
+    except MediaError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"clips": results} if isinstance(data, ClipRanges) else results[0]
 
 
 @router.post("/projects/{project_id}/clips/merge")

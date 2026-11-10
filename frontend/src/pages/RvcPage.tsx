@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { isAxiosError } from 'axios'
-import { RvcAudioRangeEditor, RvcManualEditor } from '@/components/RvcManualEditor'
+import { RvcAudioRangeEditor, RvcManualEditor, type AudioRange } from '@/components/RvcManualEditor'
 import { RvcSources, type Project, type RunAction } from '@/components/RvcSources'
 import { api } from '@/lib/api'
 import { API_URL } from '@/lib/config'
@@ -117,21 +117,25 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
     })
   }
 
-  function saveManualClip(path: string, payload: { start: number; end: number } | { clip_ids: string[] }) {
-    const merging = 'clip_ids' in payload
-    const trimming = path.endsWith('/trim')
-    run(merging ? '合并所选片段' : '生成手工片段', async () => {
-      const { data } = await api.post<ManualClip>(base + path, payload)
-      if (merging || trimming) setSelected([data.id])
-      if (trimming) {
-        setTrimResults(previous => previous.some(clip => clip.id === data.id) ? previous : [...previous, data])
-      } else {
-        setManualClip(data)
-        setTrimTarget(merging ? data : undefined)
-      }
-      if ('clip_ids' in payload) {
-        setTrimResults(previous => previous.filter(clip => !payload.clip_ids.includes(clip.id) || clip.id === data.id))
-      }
+  function mergeSelected() {
+    run('合并所选片段', async () => {
+      const { data } = await api.post<ManualClip>(base + '/clips/merge', { clip_ids: selected })
+      setSelected([data.id])
+      setManualClip(data)
+      setTrimTarget(data)
+      setTrimResults(previous => previous.filter(clip => !selected.includes(clip.id) || clip.id === data.id))
+      await queryClient.invalidateQueries({ queryKey: bufferKey })
+      refresh()
+      await queryClient.invalidateQueries({ queryKey: ['rvc-clips', id] })
+    })
+  }
+
+  function saveRanges(path: string, ranges: AudioRange[], onSaved: () => void) {
+    run('保存截取选区', async () => {
+      const { data } = await api.post<{ clips: Clip[] }>(base + path, { ranges })
+      setSelected(data.clips.map(clip => clip.id))
+      setTrimResults(previous => [...previous, ...data.clips.filter(clip => !previous.some(item => item.id === clip.id))])
+      onSaved()
       await queryClient.invalidateQueries({ queryKey: bufferKey })
       refresh()
       await queryClient.invalidateQueries({ queryKey: ['rvc-clips', id] })
@@ -241,7 +245,7 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
           {' · '}合格时长 {timestamp(details.data?.review.kept?.seconds ?? 0)} / {project.target_minutes} 分钟
         </p>
         <RvcManualEditor base={base} sources={sources.filter(source => source.status === 'done')} busy={busy} run={run}
-          onSave={(sourceId, start, end) => saveManualClip('/sources/' + sourceId + '/clips', { start, end })} />
+          onSave={(sourceId, ranges, onSaved) => saveRanges('/sources/' + sourceId + '/clips', ranges, onSaved)} />
         {manualClip && (
           <div className="hairline-b space-y-2 pb-4" aria-label="手工片段结果">
             <p className="text-sm text-hi" role="status">
@@ -270,7 +274,7 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
             <RvcAudioRangeEditor key={trimTarget.id} offset={0} duration={trimTarget.duration} busy={busy} fromClip
               audioUrl={API_URL + base + '/clips/' + trimTarget.id + '/audio'}
               waveformPath={base + '/clips/' + trimTarget.id + '/waveform'}
-              onSave={(start, end) => saveManualClip('/clips/' + trimTarget.id + '/trim', { start, end })} />
+              onSave={(ranges, onSaved) => saveRanges('/clips/' + trimTarget.id + '/trim', ranges, onSaved)} />
           </div>
         )}
         {!!trimResults.length && (
@@ -341,7 +345,7 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
             <button className="btn btn-secondary btn-sm" disabled={busy || !hasSelection} onClick={() => review(selected, 'kept')}>保留所选</button>
             <button className="btn btn-danger btn-sm" disabled={busy || !hasSelection} onClick={() => review(selected, 'excluded')}>剔除所选</button>
             <button className="btn btn-secondary btn-sm" disabled={busy || !hasSelection || selected.length < 2}
-              onClick={() => saveManualClip('/clips/merge', { clip_ids: selected })}>合并所选片段</button>
+              onClick={mergeSelected}>合并所选片段</button>
             <span className="text-sm text-mid" aria-live="polite">已勾选 {selected.length} 段</span>
             {selected.length >= 2 && <p className="w-full text-xs text-lo">同一素材中的片段可合并。合并成功后，所选旧片段会移入缓冲区。新片段保留起点到终点之间的原音。</p>}
           </div>

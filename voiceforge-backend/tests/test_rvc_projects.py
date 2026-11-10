@@ -18,8 +18,8 @@ from fastapi.testclient import TestClient
 
 from database import SessionLocal
 from main import app
-from processing.rvc_audio import MediaError
-from rvc_projects import RvcClip, clip_path
+from processing.rvc_audio import MediaError, write_clip
+from rvc_projects import RvcClip, clip_path, work_dir
 from sources.rvc_online import normalize_url
 
 VIDEO = "https://www.bilibili.com/video/BV1n44y1Q7sc"
@@ -371,6 +371,51 @@ def test_manual_edit_uses_the_source_timeline(client, speech, monkeypatch):
         assert wav.readframes(wav.getnframes()) == source_samples[12000:31200].astype("<i2").tobytes()
     assert client.post(source_base + "/clips", json={"start": 0, "end": info["duration"] + 0.2}).status_code == 400
     assert client.get(base).json()["review"]["pending"]["count"] == len(clips) + 1
+
+
+def test_save_ranges_as_independent_wavs(client, speech, monkeypatch):
+    _, source_file, _ = speech
+    base = new_project(client)
+    post(client, base + "/sources/local", {"kind": "local_audio", "paths": [str(source_file)]})
+    post(client, base + "/process", {"split": False})
+    source = wait_for_sources(client, base)[0]
+    assert source["status"] == "done"
+    before = client.get(base + "/clips").json()
+    parent = before["clips"][0]
+    parent_url = base + "/clips/" + parent["id"]
+    trim_url = parent_url + "/trim"
+    draft = {"ranges": [{"start": 2.0, "end": 3.25}, {"start": 0.5, "end": 1.5}, {"start": 4.0, "end": 5.5}]}
+    directory = work_dir(base.rsplit("/", 1)[1], source["id"])
+    existing_wavs = set(directory.rglob("*.wav"))
+
+    def fail_second_write(raw, path, offset, start, normalize, *, manual=False):
+        result = write_clip(raw, path, offset, start, normalize, manual=manual)
+        if start == 24000:
+            raise MediaError("模拟第二段写入失败")
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr("processing.rvc_edit.write_clip", fail_second_write)
+        assert client.post(trim_url, json=draft).status_code == 400
+    assert client.get(base + "/clips").json()["total"] == before["total"]
+    assert set(directory.rglob("*.wav")) == existing_wavs
+
+    saved = post(client, trim_url, draft)["clips"]
+    assert len({clip["id"] for clip in saved}) == len(draft["ranges"])
+    with wave.open(io.BytesIO(client.get(parent_url + "/audio").content)) as original:
+        for clip, selected in zip(saved, draft["ranges"]):
+            start, end = (round(selected[key] * original.getframerate()) for key in ("start", "end"))
+            original.setpos(start)
+            result = client.get(base + "/clips/" + clip["id"] + "/audio")
+            with wave.open(io.BytesIO(result.content)) as wav:
+                assert wav.getnframes() == end - start
+                assert wav.readframes(end - start) == original.readframes(end - start)
+    assert post(client, trim_url, draft)["clips"] == saved
+    assert client.get(base + "/clips").json()["total"] == before["total"] + len(saved)
+    assert client.get(base + "/merge-buffer").json()["clips"] == []
+
+    cuts = post(client, base + "/sources/" + source["id"] + "/clips", draft)["clips"]
+    assert len(cuts) == 3 and all(clip["quality"]["edit"] == "cut" for clip in cuts)
 
 
 def test_failed_download_retry_and_silence(client, speech, monkeypatch):

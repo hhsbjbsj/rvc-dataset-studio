@@ -5,24 +5,30 @@ import Regions, { type Region } from 'wavesurfer.js/dist/plugins/regions.esm.js'
 import Timeline from 'wavesurfer.js/dist/plugins/timeline.esm.js'
 import { api } from '@/lib/api'
 
+type WaveRange = { id: string; start: number; end: number; label: string }
+
 type Props = {
   path: string
   player: RefObject<HTMLAudioElement>
   duration: number
   offset: number
-  start: number
-  end: number
+  ranges: WaveRange[]
+  activeId: string | undefined
   busy: boolean
-  onChange: (start: number, end: number) => void
+  canDraw: boolean
+  onChange: (id: string, start: number, end: number) => void
+  onSeek: () => void
 }
 
-const regionOptions = { drag: false, color: 'rgba(124, 140, 255, 0.23)' }
+const inactiveColor = 'rgba(124, 140, 255, 0.20)'
+const activeColor = 'rgba(124, 140, 255, 0.40)'
+const regionOptions = { drag: false, contentEditable: false, color: inactiveColor }
 
-export function RvcWaveformRange({ path, player, duration, offset, start, end, busy, onChange }: Props) {
+export function RvcWaveformRange({ path, player, duration, offset, ranges, activeId, busy, canDraw, onChange, onSeek }: Props) {
   const container = useRef<HTMLDivElement>(null)
   const instance = useRef<WaveSurfer | null>(null)
-  const activeRegion = useRef<Region | null>(null)
-  const range = useRef({ start, end })
+  const regionsRef = useRef<Regions | null>(null)
+  const syncing = useRef(false)
   const [zoom, setZoom] = useState(1)
   const [ready, setReady] = useState(false)
   const [renderError, setRenderError] = useState(false)
@@ -31,12 +37,6 @@ export function RvcWaveformRange({ path, player, duration, offset, start, end, b
     queryFn: async ({ signal }) => (await api.get<{ peaks: number[] }>(path, { signal })).data.peaks,
     staleTime: Infinity,
   })
-
-  useEffect(() => {
-    range.current = { start, end }
-    const region = activeRegion.current
-    if (region && (region.start !== start || region.end !== end)) region.setOptions(range.current)
-  }, [start, end])
 
   useEffect(() => {
     const target = container.current
@@ -65,32 +65,49 @@ export function RvcWaveformRange({ path, player, duration, offset, start, end, b
       ],
     })
     instance.current = wave
-    const selectionOptions = { ...regionOptions, minLength: Math.min(0.005, duration) }
-    let stopDrawing: (() => void) | undefined
+    regionsRef.current = regions
+    const updateRange = (region: Region) => onChange(region.id, region.start, region.end)
     regions.on('region-created', region => {
-      const previous = activeRegion.current
-      activeRegion.current = region
-      if (previous) {
-        previous.remove()
-        onChange(region.start, region.end)
-      }
+      if (!syncing.current) updateRange(region)
     })
-    regions.on('region-updated', region => {
-      if (region === activeRegion.current) onChange(region.start, region.end)
-    })
-    wave.once('ready', () => {
-      regions.addRegion({ ...selectionOptions, ...range.current })
-      stopDrawing = regions.enableDragSelection(selectionOptions, 5)
-      setReady(true)
-    })
+    regions.on('region-updated', updateRange)
+    wave.on('interaction', onSeek)
+    wave.once('ready', () => setReady(true))
     wave.on('error', () => setRenderError(true))
     return () => {
-      stopDrawing?.()
       wave.destroy()
-      activeRegion.current = null
+      regionsRef.current = null
       instance.current = null
     }
-  }, [duration, offset, onChange, player, waveform.data])
+  }, [duration, offset, onChange, onSeek, player, waveform.data])
+
+  useEffect(() => {
+    const plugin = regionsRef.current
+    if (!ready || !plugin) return
+    const existing = new Map(plugin.getRegions().map(region => [region.id, region]))
+    syncing.current = true
+    for (const { id, start, end, label } of ranges) {
+      const color = id === activeId ? activeColor : inactiveColor
+      const region = existing.get(id)
+      if (region) {
+        if (region.start !== start || region.end !== end || region.color !== color) {
+          region.setOptions({ start, end, color })
+        }
+        if (region.content?.textContent !== label) region.setContent(label)
+        existing.delete(id)
+      } else {
+        plugin.addRegion({ ...regionOptions, id, start, end, color, content: label, minLength: Math.min(0.005, duration) })
+      }
+    }
+    existing.forEach(region => region.remove())
+    syncing.current = false
+  }, [activeId, duration, ranges, ready])
+
+  useEffect(() => {
+    if (ready && !busy && canDraw) {
+      return regionsRef.current?.enableDragSelection({ ...regionOptions, minLength: Math.min(0.005, duration) }, 5)
+    }
+  }, [busy, canDraw, duration, ready])
 
   useEffect(() => {
     const width = container.current?.clientWidth
@@ -100,7 +117,7 @@ export function RvcWaveformRange({ path, player, duration, offset, start, end, b
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-xs text-lo">点击波形跳到对应位置。拖动左右括号，或直接拖出新选区。</p>
+        <p className="text-xs text-lo">在波形上拖出多个选区，拖动各自的左右括号微调。点击波形可跳到对应位置。</p>
         <label className="flex items-center gap-2 text-xs text-mid">波形缩放
           <select className="input-field" value={zoom} disabled={busy || !ready}
             onChange={e => setZoom(Number(e.target.value))}>
@@ -109,7 +126,7 @@ export function RvcWaveformRange({ path, player, duration, offset, start, end, b
         </label>
       </div>
       <div className={'rvc-waveform min-h-24 rounded-md border border-white/10 bg-black/5 px-2 pt-2' + (busy ? ' pointer-events-none' : '')}
-        aria-label="音频波形和截取选区" ref={container} />
+        aria-label="音频波形和截取选区" aria-disabled={busy} ref={container} />
       {(waveform.isError || renderError) && <p role="alert" className="text-xs text-mid">波形加载失败，可以继续用起点和终点输入框截取。</p>}
       {!ready && !waveform.isError && !renderError && <p className="text-xs text-lo">正在加载波形…</p>}
     </div>

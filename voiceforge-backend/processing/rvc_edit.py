@@ -4,6 +4,7 @@ import hashlib
 import logging
 import os
 import tempfile
+from collections.abc import Iterable
 from pathlib import Path
 from threading import Lock
 
@@ -104,35 +105,35 @@ def create_edit(
     db: Session, source: RvcSource, start: float, end: float, method: str,
     *, replace: list[RvcClip] | None = None,
 ) -> dict:
+    return create_edits(db, source, [(start, end)], method, replace=replace)[0]
+
+
+def create_edits(
+    db: Session, source: RvcSource, ranges: list[tuple[float, float]], method: str,
+    *, clip: RvcClip | None = None, replace: list[RvcClip] | None = None,
+) -> list[dict]:
     offset = source_offset(source)
-    if start < offset - 0.000001 or end <= start or end - start > MAX_EDIT_SECONDS:
-        raise MediaError(f"请选择原音轨内起点早于终点、时长不超过 {MAX_EDIT_SECONDS} 秒的范围。")
+    minimum = offset if clip is None else 0.0
+    frame_offset = 0 if clip is None else round((clip.start - offset) * WORK_RATE)
+    prefix = "manual" if clip is None else "trim"
 
-    path = prepare_source_audio(source)
-    first = max(0, round((start - offset) * WORK_RATE))
-    last = round((end - offset) * WORK_RATE)
-    raw, _ = read_edit_range(path, first, last)
-    return save_edit(
-        db, source, raw, offset=offset, first=first,
-        digest_key=f"manual:{source.id}:{first}:{last}:", method=method,
-        normalize=source.options.get("normalize", False), replace=replace,
-    )
+    for start, end in ranges:
+        if start < minimum - (0.000001 if clip is None else 0) or end <= start or end - start > MAX_EDIT_SECONDS:
+            raise MediaError(f"请选择音轨内起点早于终点、时长不超过 {MAX_EDIT_SECONDS} 秒的范围。")
+    path = prepare_source_audio(source) if clip is None else clip_path(clip)
 
+    def read_ranges():
+        for start, end in ranges:
+            first = max(0, round((start - minimum) * WORK_RATE))
+            last = round((end - minimum) * WORK_RATE)
+            raw, frames = read_edit_range(path, first, last)
+            if clip is not None and first == 0 and last == frames:
+                raise MediaError("请缩小截取范围，以生成新的片段。")
+            yield raw, first, f"{prefix}:{source.id}:{frame_offset + first}:{frame_offset + last}:"
 
-def trim_clip(db: Session, source: RvcSource, clip: RvcClip, start: float, end: float) -> dict:
-    if start < 0 or end <= start or end - start > MAX_EDIT_SECONDS:
-        raise MediaError(f"请选择起点早于终点、时长不超过 {MAX_EDIT_SECONDS} 秒的范围。")
-
-    first, last = round(start * WORK_RATE), round(end * WORK_RATE)
-    path = clip_path(clip)
-    raw, frames = read_edit_range(path, first, last)
-    if first == 0 and last == frames:
-        raise MediaError("请缩小截取范围，以生成新的片段。")
-    source_frame = round((clip.start - source_offset(source)) * WORK_RATE)
-    return save_edit(
-        db, source, raw, offset=clip.start, first=first,
-        digest_key=f"trim:{source.id}:{source_frame + first}:{source_frame + last}:",
-        method="trim", normalize=False,
+    return save_edits(
+        db, source, read_ranges(), offset=offset if clip is None else clip.start, method=method,
+        normalize=clip is None and source.options.get("normalize", False), replace=replace,
     )
 
 
@@ -152,57 +153,61 @@ def read_edit_range(path: Path, first: int, last: int) -> tuple[bytes, int]:
         raise MediaError("当前音频文件无法读取。") from exc
 
 
-def save_edit(
-    db: Session, source: RvcSource, raw: bytes, *, offset: float, first: int,
-    digest_key: str, method: str, normalize: bool, replace: list[RvcClip] | None = None,
-) -> dict:
+def save_edits(
+    db: Session, source: RvcSource, edits: Iterable[tuple[bytes, int, str]], *,
+    offset: float, method: str, normalize: bool, replace: list[RvcClip] | None = None,
+) -> list[dict]:
     project_id = source.project_id
-    digest = hashlib.sha256(digest_key.encode() + raw).hexdigest()
-    existing = select(RvcClip).where(RvcClip.project_id == project_id, RvcClip.digest == digest)
-    clip = db.scalar(existing)
-    buffered_result = db.get(RvcMergeBuffer, clip.id) if clip is not None else None
-    if clip is not None and replace is None and buffered_result is None:
-        return clip_data(clip, source)
+    project_clips = select(RvcClip).where(RvcClip.project_id == project_id)
+    destinations = []
+    digests = set()
+    clips = []
 
-    destination = None
-    buffered_count = 0
     try:
-        if clip is None:
-            generation = new_id()
-            root = work_dir(project_id, source.id)
-            directory = root / generation
-            check_space(root, len(raw))
-            directory.mkdir()
-            destination = directory / "000001.wav"
-            data = write_clip(raw, destination, offset, first, normalize, manual=True)
-            data["digest"] = digest
-            data["quality"]["edit"] = method
-            clip = RvcClip(id=new_id(), project_id=project_id, source_id=source.id, generation=generation, **data)
-            db.add(clip)
+        for raw, first, digest_key in edits:
+            digest = hashlib.sha256(digest_key.encode() + raw).hexdigest()
+            if digest in digests:
+                raise MediaError("有重复的选区，请调整或移除后再保存。")
+            digests.add(digest)
+            clip = db.scalar(project_clips.where(RvcClip.digest == digest))
+            if clip is None:
+                generation = new_id()
+                root = work_dir(project_id, source.id)
+                directory = root / generation
+                check_space(root, len(raw))
+                directory.mkdir()
+                destination = directory / "000001.wav"
+                destinations.append(destination)
+                data = write_clip(raw, destination, offset, first, normalize, manual=True)
+                data["digest"] = digest
+                data["quality"]["edit"] = method
+                clip = RvcClip(id=new_id(), project_id=project_id, source_id=source.id, generation=generation, **data)
+                db.add(clip)
+            elif (buffered := db.get(RvcMergeBuffer, clip.id)) is not None:
+                restore_buffer_audio(clip)
+                db.delete(buffered)
+            clips.append(clip)
 
-        if buffered_result is not None:
-            restore_buffer_audio(clip)
-            db.delete(buffered_result)
-        if replace is not None:
-            retired = [item for item in replace if item.id != clip.id]
-            db.add_all(RvcMergeBuffer(clip_id=item.id) for item in retired)
-            buffered_count = len(retired)
+        retired = [] if replace is None else [item for item in replace if item.id != clips[0].id]
+        db.add_all(RvcMergeBuffer(clip_id=item.id) for item in retired)
         db.commit()
     except Exception as exc:
         db.rollback()
-        if destination is not None:
+        for destination in destinations:
             destination.unlink(missing_ok=True)
             destination.parent.rmdir()
         if isinstance(exc, IntegrityError):
-            if replace is None and (clip := db.scalar(existing)) is not None:
-                return clip_data(clip, source)
+            if replace is None and len(digests) == 1 and (clip := db.scalar(
+                project_clips.where(RvcClip.digest == next(iter(digests)), RvcClip.id.not_in(select(RvcMergeBuffer.clip_id)))
+            )) is not None:
+                return [clip_data(clip, source)]
             raise MediaError("片段已被另一项操作修改，请重新选择。") from exc
         raise
 
-    result = clip_data(clip, source)
+    results = [clip_data(clip, source) for clip in clips]
     if replace is not None:
-        result["replaced_count"] = buffered_count
-    return result
+        results[0]["replaced_count"] = len(retired)
+    return results
 
 
 def restore_buffer_audio(clip: RvcClip) -> None:
