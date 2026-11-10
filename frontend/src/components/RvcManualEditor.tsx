@@ -131,9 +131,10 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
     const target = event.target
     if (!(target instanceof HTMLElement) || target.closest('select, textarea, audio, [contenteditable="true"]')) return
 
-    if (event.key === ' ' && preview.current?.loop && !target.closest('button')) {
+    const button = target.closest('button')
+    if (event.key === ' ' && (!button || button.matches('[data-range-picker][aria-pressed="true"]'))) {
       event.preventDefault()
-      if (!event.repeat) toggleLoopPlayback()
+      if (!event.repeat) toggleRangeLoop(active)
       return
     }
 
@@ -175,10 +176,14 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
     })
   }
 
-  function toggleLoopPlayback() {
+  function toggleRangeLoop(draft: Draft) {
     const current = preview.current
+    if (!current?.loop || current.id !== draft.id) {
+      previewRange(draft, true)
+      return
+    }
     const audio = player.current
-    if (!current?.loop || !audio) return
+    if (!audio) return
     if (!audio.paused) {
       current.suspended = true
       audio.pause()
@@ -268,14 +273,14 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
             const loopAction = looping ? (playing ? '暂停循环' : '继续循环') : '循环试听'
             return (
               <li key={draft.id} className="flex flex-wrap items-center gap-2 rounded-md border border-white/10 p-2 text-sm text-mid">
-                <button className="btn btn-secondary btn-sm" aria-pressed={draft.id === active?.id} disabled={busy}
+                <button className="btn btn-secondary btn-sm" data-range-picker aria-pressed={draft.id === active?.id} disabled={busy}
                   onClick={() => setActiveId(draft.id)}>选区 {number}</button>
                 <span className="tabular-nums">{draft.start || '—'} – {draft.end || '—'} 秒</span>
                 <button className="btn btn-secondary btn-sm" aria-label={'试听选区 ' + number} disabled={busy || !!error}
                   onClick={() => previewRange(draft, false)}>试听</button>
                 <button className={looping ? 'btn btn-primary btn-sm' : 'btn btn-secondary btn-sm'}
                   aria-label={loopAction + '选区 ' + number} disabled={busy || (!looping && !!error)}
-                  onClick={() => looping ? toggleLoopPlayback() : previewRange(draft, true)}>
+                  onClick={() => toggleRangeLoop(draft)}>
                   {loopAction}
                 </button>
                 {looping && (
@@ -303,7 +308,7 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
         <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => mark('end')}>标记终点</button>
       </div>}
       {active && <p className="text-xs text-lo">
-        ← / → 调起点，Shift + ← / → 调终点，时间框用 ↑ / ↓，每次 0.01 秒。空格暂停或继续循环。
+        ← / → 调起点，Shift + ← / → 调终点，时间框用 ↑ / ↓，每次 0.01 秒。空格循环试听当前选区，再按暂停或继续。
       </p>}
       <div className="flex flex-wrap items-center gap-2">
         <button className="btn btn-secondary btn-sm" disabled={busy || drafts.length >= MAX_RANGES} onClick={() => {
