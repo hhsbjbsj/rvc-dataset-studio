@@ -3,6 +3,7 @@ import { Header } from '@/components/Header'
 import { HomePage } from '@/pages/HomePage'
 import { ConvertPage } from '@/pages/ConvertPage'
 import { HistoryPage } from '@/pages/HistoryPage'
+import { RvcPage } from '@/pages/RvcPage'
 
 export default function App() {
   return (
@@ -11,6 +12,7 @@ export default function App() {
       <main className="relative">
         <Routes>
           <Route path="/" element={<HomePage />} />
+          <Route path="/rvc" element={<RvcPage />} />
           <Route path="/convert" element={<ConvertPage />} />
           <Route path="/history" element={<HistoryPage />} />
         </Routes>

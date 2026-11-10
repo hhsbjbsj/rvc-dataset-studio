@@ -165,6 +165,7 @@ export async function cancelJob(jobId: string) {
 export interface Health {
   status: string
   redis: 'connected' | 'disconnected' | string
+  rvc: 'ready' | 'missing_ffmpeg'
 }
 
 export async function getHealth() {

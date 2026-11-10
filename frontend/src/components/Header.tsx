@@ -1,11 +1,12 @@
 import { Link, useLocation } from 'react-router-dom'
-import { History, FileAudio, AudioLines, Sun, Moon } from 'lucide-react'
+import { History, FileAudio, AudioLines, FolderOpen, Sun, Moon } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 import { BrandMark } from './BrandMark'
 import { getHealth } from '@/lib/api'
 import { useColorMode } from '@/lib/theme'
 
 const navItems = [
+  { path: '/rvc', label: 'RVC 项目', icon: FolderOpen },
   { path: '/', label: 'Build', icon: AudioLines },
   { path: '/convert', label: 'Convert', icon: FileAudio },
   { path: '/history', label: 'History', icon: History },
@@ -27,6 +28,10 @@ function BackendStatus() {
       dot = 'dot dot-bad'
       label = 'Backend offline'
       title = 'The FastAPI backend is not reachable. Run the start script.'
+    } else if (data.rvc === 'ready') {
+      dot = 'dot dot-ok'
+      label = 'RVC 就绪'
+      title = data.redis === 'connected' ? 'RVC 和旧版任务队列均已就绪' : 'RVC 已就绪，旧版 Build 需要 Redis'
     } else if (data.redis !== 'connected') {
       dot = 'dot dot-bad'
       label = 'Queue offline'
@@ -71,6 +76,7 @@ export function Header() {
                 key={path}
                 to={path}
                 className="segmented-item !px-3 sm:!px-4"
+                aria-label={label}
                 data-active={isActive}
                 aria-current={isActive ? 'page' : undefined}
               >

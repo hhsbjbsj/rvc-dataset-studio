@@ -4,6 +4,8 @@
 
 # Beatrice Dataset Studio for Windows
 
+[简体中文 · Windows RVC 数据集工作台](README.zh-CN.md)
+
 **Turn any voice into a clean, transcribed training dataset, on your own PC.**<br/>
 Search a character or voice actor, or drop in your own recordings. The studio isolates the voice, slices it into clips, scores and transcribes them, and hands you a ZIP that's ready for the Beatrice trainer, RVC or TTS.
 
