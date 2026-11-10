@@ -10,6 +10,7 @@ type Draft = { id: string; start: string; end: string }
 type RangePreview = AudioRange & { id: string; loop: boolean }
 type SaveRanges = (ranges: AudioRange[], onSaved: () => void) => void
 const MAX_RANGES = 50
+const PREVIEW_RATES = [1, 0.75, 0.5]
 
 type Props = {
   base: string
@@ -33,6 +34,7 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
   const [drafts, setDrafts] = useState<Draft[]>([])
   const [activeId, setActiveId] = useState<string>()
   const [position, setPosition] = useState(offset)
+  const [playbackRate, setPlaybackRate] = useState(1)
   const [playbackError, setPlaybackError] = useState('')
   const [loopingId, setLoopingId] = useState<string>()
   const player = useRef<HTMLAudioElement>(null)
@@ -155,6 +157,7 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
         onChange={updateWaveRange} onSeek={seekWaveform} />
       <audio ref={player} className="w-full" aria-label={fromClip ? '待截取片段' : '原音轨'} controls preload="metadata"
         src={audioUrl}
+        onRateChange={event => setPlaybackRate(event.currentTarget.playbackRate)}
         onError={() => {
           clearPreview()
           setPlaybackError('音频加载失败，请重新打开编辑。')
@@ -176,9 +179,21 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
           keepPreviewInRange(audio)
           setPosition(audio.currentTime + offset)
         }} />
-      <p className="text-xs text-lo">
-        {fromClip ? '片段内位置' : '原素材位置'} {position.toFixed(3)} 秒 · 可选范围 {offset.toFixed(3)} 至 {limit.toFixed(3)} 秒
-      </p>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-xs text-lo">
+          {fromClip ? '片段内位置' : '原素材位置'} {position.toFixed(3)} 秒 · 可选范围 {offset.toFixed(3)} 至 {limit.toFixed(3)} 秒
+        </p>
+        <div className="flex flex-wrap items-center gap-2" role="group" aria-label="试听速度">
+          <span className="text-xs text-mid">试听速度</span>
+          {PREVIEW_RATES.map(rate => (
+            <button key={rate} type="button" aria-pressed={playbackRate === rate}
+              className={playbackRate === rate ? 'btn btn-primary btn-sm' : 'btn btn-secondary btn-sm'}
+              onClick={() => { if (player.current) player.current.playbackRate = rate }}>
+              {rate} 倍
+            </button>
+          ))}
+        </div>
+      </div>
       {!!drafts.length && (
         <ol className="space-y-2" aria-label="待保存选区">
           {drafts.map((draft, index) => {
@@ -236,7 +251,7 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
       </div>
       {hasDuplicates && <p className="text-xs text-lo">有重复的选区，请调整或移除后再保存。</p>}
       {drafts.length >= MAX_RANGES && <p className="text-xs text-lo">已达到单批 50 段的上限。</p>}
-      <p className="text-xs text-lo">选区确认后可一起保存，每段生成一个独立的 WAV。</p>
+      <p className="text-xs text-lo">选区确认后可一起保存，每段生成一个原速 WAV。</p>
       {playbackError && <p role="alert" className="text-sm text-mid">{playbackError}</p>}
     </div>
   )
