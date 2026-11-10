@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import type { RunAction } from '@/components/RvcSources'
 import { RvcWaveformRange } from '@/components/RvcWaveformRange'
 import { api } from '@/lib/api'
@@ -10,7 +10,8 @@ type Draft = { id: string; start: string; end: string }
 type RangePreview = AudioRange & { id: string; loop: boolean }
 type SaveRanges = (ranges: AudioRange[], onSaved: () => void) => void
 const MAX_RANGES = 50
-const PREVIEW_RATES = [1, 0.75, 0.5]
+const PREVIEW_RATES = [1, 0.75, 0.5, 0.25]
+const NUDGE_SECONDS = 0.01
 
 type Props = {
   base: string
@@ -124,6 +125,35 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
     setDrafts(previous => previous.map(draft => draft.id === active?.id ? { ...draft, [field]: value } : draft))
   }
 
+  function nudgeRange(event: KeyboardEvent<HTMLDivElement>) {
+    if (!active || busy || event.altKey || event.ctrlKey || event.metaKey || event.nativeEvent.isComposing) return
+    const target = event.target
+    if (!(target instanceof HTMLElement) || target.closest('select, textarea, audio, [contenteditable="true"]')) return
+
+    let field: 'start' | 'end'
+    let direction: number
+    if (target instanceof HTMLInputElement) {
+      if (target.name !== 'start' && target.name !== 'end') return
+      if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return
+      field = target.name
+      direction = event.key === 'ArrowUp' ? 1 : -1
+    } else {
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+      field = event.shiftKey ? 'end' : 'start'
+      direction = event.key === 'ArrowRight' ? 1 : -1
+    }
+
+    event.preventDefault()
+    setDrafts(previous => previous.map(draft => {
+      if (draft.id !== active.id || !draft[field]) return draft
+      const time = Number((Number(draft[field]) + direction * NUDGE_SECONDS).toFixed(9))
+      if (time < offset || time > limit) return draft
+      const next = { ...draft, [field]: String(time) }
+      if (next.start && next.end && Number(next.start) >= Number(next.end)) return draft
+      return next
+    }))
+  }
+
   function mark(field: 'start' | 'end') {
     const audio = player.current
     if (!audio) return
@@ -151,7 +181,7 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
   }
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-3" onKeyDown={nudgeRange}>
       <RvcWaveformRange path={waveformPath} player={player} duration={duration} offset={offset}
         ranges={waveRanges} activeId={active?.id} busy={busy} canDraw={drafts.length < MAX_RANGES}
         onChange={updateWaveRange} onSeek={seekWaveform} />
@@ -208,7 +238,7 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
                 <button className="btn btn-secondary btn-sm" aria-label={'试听选区 ' + number} disabled={busy || !!error}
                   onClick={() => previewRange(draft, false)}>试听</button>
                 <button className={looping ? 'btn btn-primary btn-sm' : 'btn btn-secondary btn-sm'}
-                  aria-label={(looping ? '停止循环选区 ' : '循环试听选区 ') + number} disabled={busy || !!error}
+                  aria-label={(looping ? '停止循环选区 ' : '循环试听选区 ') + number} disabled={busy || (!looping && !!error)}
                   onClick={() => looping ? stopPreview() : previewRange(draft, true)}>
                   {looping ? '停止循环' : '循环试听'}
                 </button>
@@ -222,16 +252,19 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
       )}
       {active && <div className="flex flex-wrap items-end gap-2">
         <label className="text-sm text-mid">起点（秒）
-          <input className="input-field mt-1 block w-28" type="number" step="any" min={offset} max={limit}
+          <input className="input-field mt-1 block w-28" type="number" name="start" step="any" min={offset} max={limit}
             value={active.start} disabled={busy} onChange={e => updateDraft('start', e.target.value)} />
         </label>
         <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => mark('start')}>标记起点</button>
         <label className="text-sm text-mid">终点（秒）
-          <input className="input-field mt-1 block w-28" type="number" step="any" min={offset} max={limit}
+          <input className="input-field mt-1 block w-28" type="number" name="end" step="any" min={offset} max={limit}
             value={active.end} disabled={busy} onChange={e => updateDraft('end', e.target.value)} />
         </label>
         <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => mark('end')}>标记终点</button>
       </div>}
+      {active && <p className="text-xs text-lo">
+        编辑器内用 ← / → 调起点，Shift + ← / → 调终点。聚焦时间框后用 ↑ / ↓。每次 0.01 秒。
+      </p>}
       <div className="flex flex-wrap items-center gap-2">
         <button className="btn btn-secondary btn-sm" disabled={busy || drafts.length >= MAX_RANGES} onClick={() => {
           const id = crypto.randomUUID()
