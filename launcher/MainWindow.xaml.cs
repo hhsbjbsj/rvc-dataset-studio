@@ -24,7 +24,7 @@ public partial class MainWindow : Window
     private readonly string wallpaperPath;
     private readonly Workbench workbench;
     private LauncherSettings settings;
-    private bool ready;
+    private Uri? page;
     private bool busy;
     private bool probing;
     private bool checkingUpdate;
@@ -105,10 +105,10 @@ public partial class MainWindow : Window
     {
         ServiceStatus.Text = T(serviceMessage, serviceArguments);
         ServiceStatus.ToolTip = ServiceStatus.Text;
-        ServiceDot.Fill = ready ? Brushes.LightGreen : busy ? Brushes.LightSkyBlue : Brushes.LightSlateGray;
+        ServiceDot.Fill = page is not null ? Brushes.LightGreen : busy ? Brushes.LightSkyBlue : Brushes.LightSlateGray;
         ServiceProgress.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
-        LaunchButton.IsEnabled = !busy && (ready || workbench.HasProject);
-        LaunchButton.Content = T(ready ? "openStudio" : workbench.NeedsSetup ? "initialize" : "launch");
+        LaunchButton.IsEnabled = !busy && workbench.HasProject;
+        LaunchButton.Content = T(page is not null ? "openStudio" : workbench.NeedsSetup ? "initialize" : "launch");
     }
 
     private async Task ProbeAsync()
@@ -117,11 +117,15 @@ public partial class MainWindow : Window
         probing = true;
         try
         {
-            bool available = await Workbench.IsReadyAsync(shutdown.Token);
+            Uri? available = await workbench.FindPageAsync(shutdown.Token);
             if (busy || shutdown.IsCancellationRequested) return;
-            bool changed = ready != available;
-            ready = available;
-            if (changed || serviceMessage == "checkingService") SetServiceMessage(ready ? "ready" : IdleMessage());
+            bool changed = page != available;
+            page = available;
+            if (changed || serviceMessage == "checkingService")
+            {
+                if (page is not null) SetServiceMessage("ready", page.Authority);
+                else SetServiceMessage(IdleMessage());
+            }
         }
         finally
         {
@@ -137,8 +141,8 @@ public partial class MainWindow : Window
         bool installing = false;
         try
         {
-            ready = await Workbench.IsReadyAsync(shutdown.Token);
-            if (!ready)
+            page = await workbench.FindPageAsync(shutdown.Token);
+            if (page is null)
             {
                 if (!workbench.HasProject)
                 {
@@ -154,14 +158,16 @@ public partial class MainWindow : Window
                     return;
                 }
                 SetServiceMessage("starting");
-                ready = await workbench.StartAsync(shutdown.Token);
+                page = await workbench.StartAsync(shutdown.Token);
             }
-            SetServiceMessage(ready ? "ready" : "startFailed");
-            if (ready)
+            if (page is null)
             {
-                try { Open(Workbench.Page.AbsoluteUri); }
-                catch (Win32Exception) { SetServiceMessage("browserFailed", Workbench.Page.AbsoluteUri); }
+                SetServiceMessage("startFailed");
+                return;
             }
+            SetServiceMessage("ready", page.Authority);
+            try { Open(page.AbsoluteUri); }
+            catch (Win32Exception) { SetServiceMessage("browserFailed", page.AbsoluteUri); }
         }
         catch (Exception exception) when (exception is Win32Exception or IOException or UnauthorizedAccessException or InvalidOperationException)
         {

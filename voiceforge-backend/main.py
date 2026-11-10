@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -102,7 +103,10 @@ def api_health():
 
 @app.get("/api/rvc/health")
 def rvc_health():
-    return {"status": "ok", "rvc": "ready" if shutil.which("ffmpeg") and shutil.which("ffprobe") else "missing_ffmpeg"}
+    health = {"status": "ok", "rvc": "ready" if shutil.which("ffmpeg") and shutil.which("ffprobe") else "missing_ffmpeg"}
+    if settings.RVC_SERVE_FRONTEND and (instance := os.environ.get("RVC_LAUNCHER_INSTANCE")):
+        health["launcher_instance"] = instance
+    return health
 
 
 def _check_redis() -> str:
