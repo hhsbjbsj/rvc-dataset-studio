@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import { useI18n, type MessageKey } from '@/lib/i18n'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import type { RunAction } from '@/components/RvcSources'
-import { RvcWaveformRange } from '@/components/RvcWaveformRange'
 import { api } from '@/lib/api'
 import { API_URL } from '@/lib/config'
+
+const RvcWaveformRange = lazy(() => import('@/components/RvcWaveformRange').then(module => ({ default: module.RvcWaveformRange })))
 
 type AudioInfo = { duration: number; offset: number }
 export type AudioRange = { start: number; end: number }
@@ -32,12 +34,13 @@ type RangeProps = AudioInfo & {
 }
 
 export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, busy, fromClip = false, onSave, onLoadError }: RangeProps) {
+  const { t } = useI18n()
   const limit = offset + duration
   const [drafts, setDrafts] = useState<Draft[]>([])
   const [activeId, setActiveId] = useState<string>()
   const [position, setPosition] = useState(offset)
   const [playbackRate, setPlaybackRate] = useState(1)
-  const [playbackError, setPlaybackError] = useState('')
+  const [playbackError, setPlaybackError] = useState<MessageKey | ''>('')
   const [loopingId, setLoopingId] = useState<string>()
   const [playing, setPlaying] = useState(false)
   const player = useRef<HTMLAudioElement>(null)
@@ -117,10 +120,10 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
   function rangeError(draft: Draft) {
     const start = Number(draft.start)
     const end = Number(draft.end)
-    if (!draft.start || !draft.end) return '请填写起点和终点。'
-    if (start < offset || end > limit || end <= start) return '请在音轨内选择起点和终点。'
-    if (end - start > 120) return '每个选区最长 120 秒。'
-    if (fromClip && start === offset && end === limit) return '请缩小范围，以生成新的片段。'
+    if (!draft.start || !draft.end) return t('editor.requireBounds')
+    if (start < offset || end > limit || end <= start) return t('editor.invalidBounds')
+    if (end - start > 120) return t('editor.rangeLimit')
+    if (fromClip && start === offset && end === limit) return t('editor.mustShorten')
     return ''
   }
   const ranges = drafts.map(draft => ({ start: Number(draft.start), end: Number(draft.end) }))
@@ -267,7 +270,7 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
     void audio.play().catch(() => {
       if (preview.current !== current || current.suspended) return
       clearPreview()
-      setPlaybackError('暂时无法播放这段音频。')
+      setPlaybackError('editor.playError')
     })
   }
 
@@ -306,15 +309,17 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
 
   return (
     <div className="space-y-3" onKeyDown={handleEditorKeys}>
-      <RvcWaveformRange path={waveformPath} player={player} container={waveform} duration={duration} offset={offset}
-        ranges={waveRanges} activeId={active?.id} busy={busy} canDraw={drafts.length < MAX_RANGES}
-        onChange={updateWaveRange} onSelect={setActiveId} onNavigate={navigateDraft} onSeek={seekWaveform} />
-      <audio ref={player} className="w-full" aria-label={fromClip ? '待截取片段' : '原音轨'} controls preload="metadata"
+      <Suspense fallback={<p className="text-xs text-lo" role="status">{t('wave.loading')}</p>}>
+        <RvcWaveformRange path={waveformPath} player={player} container={waveform} duration={duration} offset={offset}
+          ranges={waveRanges} activeId={active?.id} busy={busy} canDraw={drafts.length < MAX_RANGES}
+          onChange={updateWaveRange} onSelect={setActiveId} onNavigate={navigateDraft} onSeek={seekWaveform} />
+      </Suspense>
+      <audio ref={player} className="w-full" aria-label={fromClip ? t('editor.clipAudio') : t('editor.originalAudio')} controls preload="metadata"
         src={audioUrl}
         onRateChange={event => setPlaybackRate(event.currentTarget.playbackRate)}
         onError={() => {
           clearPreview()
-          setPlaybackError('音频加载失败，请重新打开编辑。')
+          setPlaybackError('editor.loadError')
           onLoadError?.()
         }}
         onPlay={event => {
@@ -347,44 +352,45 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
         }} />
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-xs text-lo">
-          {fromClip ? '片段内位置' : '原素材位置'} {position.toFixed(3)} 秒 · 可选范围 {offset.toFixed(3)} 至 {limit.toFixed(3)} 秒
+          {t('editor.position', { label: t(fromClip ? 'editor.positionClip' : 'editor.positionOriginal'),
+            position: position.toFixed(3), start: offset.toFixed(3), end: limit.toFixed(3) })}
         </p>
-        <div className="flex flex-wrap items-center gap-2" role="group" aria-label="试听速度">
-          <span className="text-xs text-mid">试听速度</span>
+        <div className="flex flex-wrap items-center gap-2" role="group" aria-label={t('editor.speed')}>
+          <span className="text-xs text-mid">{t('editor.speed')}</span>
           {PREVIEW_RATES.map(rate => (
             <button key={rate} type="button" aria-pressed={playbackRate === rate}
               className={playbackRate === rate ? 'btn btn-primary btn-sm' : 'btn btn-secondary btn-sm'}
               onClick={() => { if (player.current) player.current.playbackRate = rate }}>
-              {rate} 倍
+              {t('multiplier', { number: rate })}
             </button>
           ))}
         </div>
       </div>
       {!!drafts.length && (
-        <ol className="space-y-2" aria-label="待保存选区">
+        <ol className="space-y-2" aria-label={t('editor.pendingRanges')}>
           {drafts.map((draft, index) => {
             const number = index + 1
             const error = rangeError(draft)
             const looping = draft.id === loopingId
-            const loopAction = looping ? (playing ? '暂停循环' : '继续循环') : '循环试听'
+            const loopAction = looping ? (playing ? t('editor.pauseLoop') : t('editor.resumeLoop')) : t('editor.startLoop')
             return (
               <li key={draft.id} className="flex flex-wrap items-center gap-2 rounded-md border border-white/10 p-2 text-sm text-mid">
                 <button className="btn btn-secondary btn-sm" data-range-picker aria-pressed={draft.id === active?.id} disabled={busy}
-                  onClick={() => setActiveId(draft.id)}>选区 {number}</button>
-                <span className="tabular-nums">{draft.start || '—'} – {draft.end || '—'} 秒</span>
-                <button className="btn btn-secondary btn-sm" aria-label={'试听选区 ' + number} disabled={busy || !!error}
-                  onClick={() => previewRange(draft, false)}>试听</button>
+                  onClick={() => setActiveId(draft.id)}>{t('editor.range', { number })}</button>
+                <span className="tabular-nums">{t('editor.rangeTimes', { start: draft.start || '—', end: draft.end || '—' })}</span>
+                <button className="btn btn-secondary btn-sm" aria-label={t('editor.rangeAction', { action: t('editor.preview'), number })} disabled={busy || !!error}
+                  onClick={() => previewRange(draft, false)}>{t('editor.preview')}</button>
                 <button className={looping ? 'btn btn-primary btn-sm' : 'btn btn-secondary btn-sm'}
-                  aria-label={loopAction + '选区 ' + number} disabled={busy || (!looping && !!error)}
+                  aria-label={t('editor.rangeAction', { action: loopAction, number })} disabled={busy || (!looping && !!error)}
                   onClick={() => toggleRangeLoop(draft)}>
                   {loopAction}
                 </button>
                 {looping && (
-                  <button className="btn btn-secondary btn-sm" aria-label={'停止循环选区 ' + number} disabled={busy}
-                    onClick={stopPreview}>停止循环</button>
+                  <button className="btn btn-secondary btn-sm" aria-label={t('editor.rangeAction', { action: t('editor.stopLoop'), number })} disabled={busy}
+                    onClick={stopPreview}>{t('editor.stopLoop')}</button>
                 )}
-                <button className="btn btn-secondary btn-sm" aria-label={'移除选区 ' + number} disabled={busy}
-                  onClick={() => removeDraft(draft.id)}>移除</button>
+                <button className="btn btn-secondary btn-sm" aria-label={t('editor.rangeAction', { action: t('editor.remove'), number })} disabled={busy}
+                  onClick={() => removeDraft(draft.id)}>{t('editor.remove')}</button>
                 {error && <span className="text-xs text-lo">{error}</span>}
               </li>
             )
@@ -392,19 +398,19 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
         </ol>
       )}
       {active && <div className="flex flex-wrap items-end gap-2">
-        <label className="text-sm text-mid">起点（秒）
+        <label className="text-sm text-mid">{t('editor.start')}
           <input className="input-field mt-1 block w-28" type="number" name="start" step="any" min={offset} max={limit}
             value={active.start} disabled={busy} onChange={e => updateDraft('start', e.target.value)} />
         </label>
-        <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => mark('start')}>标记起点</button>
-        <label className="text-sm text-mid">终点（秒）
+        <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => mark('start')}>{t('editor.markStart')}</button>
+        <label className="text-sm text-mid">{t('editor.end')}
           <input className="input-field mt-1 block w-28" type="number" name="end" step="any" min={offset} max={limit}
             value={active.end} disabled={busy} onChange={e => updateDraft('end', e.target.value)} />
         </label>
-        <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => mark('end')}>标记终点</button>
+        <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => mark('end')}>{t('editor.markEnd')}</button>
       </div>}
       {active && <p className="text-xs text-lo">
-        聚焦波形后用 ↑ / ↓ 切换选区，循环中会从新选区的开头继续。← / → 调起点，Shift + ← / → 调终点，时间框用 ↑ / ↓，每次 0.01 秒。空格循环试听当前选区，再按暂停或继续。
+        {t('editor.keyHelp')}
       </p>}
       <div className="flex flex-wrap items-center gap-2">
         <button className="btn btn-secondary btn-sm" disabled={busy || drafts.length >= MAX_RANGES} onClick={() => {
@@ -412,29 +418,30 @@ export function RvcAudioRangeEditor({ audioUrl, waveformPath, offset, duration, 
           const start = String(Math.max(offset, Math.min(limit, Number(position.toFixed(3)))))
           setDrafts(previous => [...previous, { id, start, end: '' }])
           setActiveId(id)
-        }}>手动添加选区</button>
+        }}>{t('editor.add')}</button>
         <button className="btn btn-primary btn-sm" disabled={!canSave}
           aria-keyshortcuts="Control+S" onClick={saveAllRanges}>
-          保存全部选区{drafts.length > 0 && '（' + drafts.length + ' 段）'}
+          {drafts.length ? t('editor.saveCount', { count: drafts.length }) : t('editor.save')}
         </button>
       </div>
-      {hasDuplicates && <p className="text-xs text-lo">有重复的选区，请调整或移除后再保存。</p>}
-      {drafts.length >= MAX_RANGES && <p className="text-xs text-lo">已达到单批 50 段的上限。</p>}
-      <p className="text-xs text-lo">Delete 或小键盘 Del 移除当前选区。Ctrl+Z 撤销移除，Ctrl+Y 重做移除。循环试听时移除选区，会从下一段开头继续。Ctrl+S 保存剩余选区，每段生成一个独立的原速 WAV。</p>
-      {playbackError && <p role="alert" className="text-sm text-mid">{playbackError}</p>}
+      {hasDuplicates && <p className="text-xs text-lo">{t('editor.duplicates')}</p>}
+      {drafts.length >= MAX_RANGES && <p className="text-xs text-lo">{t('editor.batchLimit')}</p>}
+      <p className="text-xs text-lo">{t('editor.deleteHelp')}</p>
+      {playbackError && <p role="alert" className="text-sm text-mid">{t(playbackError)}</p>}
     </div>
   )
 }
 
 export function RvcManualEditor({ base, sources, busy, run, onSave }: Props) {
+  const { t } = useI18n()
   const [sourceId, setSourceId] = useState('')
   const [audioInfo, setAudioInfo] = useState<AudioInfo>()
-  const [playbackError, setPlaybackError] = useState('')
+  const [playbackError, setPlaybackError] = useState<MessageKey | ''>('')
   const activeId = sourceId || sources[0]?.id
   const sourceUrl = base + '/sources/' + activeId
 
   function loadAudio() {
-    run('载入原音轨', async () => {
+    run('editor.loadOriginal', async () => {
       const { data } = await api.post<AudioInfo>(sourceUrl + '/prepare-audio')
       setAudioInfo(data)
       setPlaybackError('')
@@ -444,21 +451,21 @@ export function RvcManualEditor({ base, sources, busy, run, onSave }: Props) {
   return (
     <details className="hairline-b space-y-3 pb-4"
       onToggle={e => { if (!e.currentTarget.open) e.currentTarget.querySelector('audio')?.pause() }}>
-      <summary className="cursor-pointer font-medium text-hi">手工截取原音轨</summary>
-      <p className="text-sm text-lo">载入后可以在波形上框选多段，或用播放位置和原素材时间设置选区。</p>
+      <summary className="cursor-pointer font-medium text-hi">{t('editor.trimOriginal')}</summary>
+      <p className="text-sm text-lo">{t('editor.originalHint')}</p>
       <div className="flex flex-wrap items-end gap-2">
-        <label className="min-w-0 text-sm text-mid">素材
+        <label className="min-w-0 text-sm text-mid">{t('editor.source')}
           <select className="input-field mt-1 block max-w-full" value={activeId ?? ''} disabled={busy || !sources.length}
             onChange={e => {
               setSourceId(e.target.value)
               setAudioInfo(undefined)
               setPlaybackError('')
             }}>
-            {!sources.length && <option value="">暂无已完成的素材</option>}
+            {!sources.length && <option value="">{t('editor.noSources')}</option>}
             {sources.map(source => <option key={source.id} value={source.id}>{source.title}</option>)}
           </select>
         </label>
-        <button className="btn btn-secondary btn-sm" disabled={busy || !activeId || !!audioInfo} onClick={loadAudio}>载入原音轨</button>
+        <button className="btn btn-secondary btn-sm" disabled={busy || !activeId || !!audioInfo} onClick={loadAudio}>{t('editor.loadOriginal')}</button>
       </div>
       {audioInfo && activeId && (
         <RvcAudioRangeEditor key={activeId} {...audioInfo} audioUrl={API_URL + sourceUrl + '/original-audio'}
@@ -466,10 +473,10 @@ export function RvcManualEditor({ base, sources, busy, run, onSave }: Props) {
           onSave={(ranges, onSaved) => onSave(activeId, ranges, onSaved)}
           onLoadError={() => {
             setAudioInfo(undefined)
-            setPlaybackError('原音轨加载失败，请重新载入。')
+            setPlaybackError('editor.originalError')
           }} />
       )}
-      {playbackError && <p role="alert" className="text-sm text-mid">{playbackError}</p>}
+      {playbackError && <p role="alert" className="text-sm text-mid">{t(playbackError)}</p>}
     </details>
   )
 }

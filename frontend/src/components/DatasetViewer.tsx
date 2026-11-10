@@ -1,19 +1,22 @@
+import { useI18n } from '@/lib/i18n'
+import { lazy, Suspense } from 'react'
 import { Download, Check } from 'lucide-react'
 import type { Job } from '@/lib/api'
 import { getDownloadUrl, getJobClips } from '@/lib/api'
-import { QualityChart } from './QualityChart'
 import { useQuery } from '@tanstack/react-query'
+
+const QualityChart = lazy(() => import('./QualityChart').then(module => ({ default: module.QualityChart })))
 
 interface DatasetViewerProps {
   job: Job
 }
 
-const STRATEGY_LABELS: Record<string, string> = {
-  hybrid: 'Hybrid',
-  dataset_hub: 'Dataset hub',
-  video_scrape: 'Video scrape',
-  auto: 'Auto',
-}
+const STRATEGY_LABELS = {
+  hybrid: 'job.hybrid',
+  dataset_hub: 'job.hub',
+  video_scrape: 'job.video',
+  auto: 'job.auto',
+} as const
 
 const FORMAT_LABELS: Record<string, string> = {
   ljspeech: 'LJSpeech',
@@ -25,7 +28,9 @@ const FORMAT_LABELS: Record<string, string> = {
 }
 
 export function DatasetViewer({ job }: DatasetViewerProps) {
+  const { t, locale } = useI18n()
   const isConversion = job.query_type === 'conversion'
+  const strategy = STRATEGY_LABELS[job.strategy as keyof typeof STRATEGY_LABELS]
   const durationMin = (job.total_seconds / 60).toFixed(1)
   const format = String(job.options?.output_format || (isConversion ? 'wav' : 'ljspeech'))
 
@@ -37,14 +42,14 @@ export function DatasetViewer({ job }: DatasetViewerProps) {
 
   const stats = isConversion
     ? [
-        { label: 'Files', value: job.total_clips.toLocaleString() },
-        { label: 'Format', value: FORMAT_LABELS[format] || format },
+        { label: t('job.files'), value: job.total_clips.toLocaleString(locale) },
+        { label: t('job.format'), value: FORMAT_LABELS[format] || format },
       ]
     : [
-        { label: 'Clips', value: job.total_clips.toLocaleString() },
-        { label: 'Speech', value: `${durationMin} min` },
-        { label: 'Strategy', value: STRATEGY_LABELS[job.strategy || ''] || job.strategy || 'Auto' },
-        { label: 'Format', value: FORMAT_LABELS[format] || format },
+        { label: t('job.clips'), value: job.total_clips.toLocaleString(locale) },
+        { label: t('job.speech'), value: t('history.minutes', { duration: durationMin }) },
+        { label: t('job.strategy'), value: strategy ? t(strategy) : job.strategy || t('job.auto') },
+        { label: t('job.format'), value: FORMAT_LABELS[format] || format },
       ]
 
   return (
@@ -55,18 +60,18 @@ export function DatasetViewer({ job }: DatasetViewerProps) {
             <Check className="h-3.5 w-3.5" strokeWidth={2.5} />
           </span>
           <div>
-            <span className="eyebrow">{isConversion ? 'Conversion complete' : 'Dataset ready'}</span>
-            <h2 className="mt-1 text-[22px] font-semibold tracking-[-0.03em]">{job.query}</h2>
+            <span className="eyebrow">{isConversion ? t('job.conversionDone') : t('job.datasetDone')}</span>
+            <h2 className="mt-1 text-[22px] font-semibold tracking-[-0.03em]">{isConversion ? t('history.convertName') : job.query}</h2>
             <p className="mt-1 text-[13px] text-mid">
               {isConversion
-                ? `${job.total_clips.toLocaleString()} files converted`
-                : `${job.total_clips.toLocaleString()} clips · ${durationMin} minutes of speech, ready to train`}
+                ? t('job.converted', { count: job.total_clips })
+                : t('job.completedClips', { count: job.total_clips, duration: durationMin })}
             </p>
           </div>
         </div>
         <a href={getDownloadUrl(job.id)} className="btn-primary">
           <Download className="h-4 w-4" strokeWidth={2} />
-          Download ZIP
+          {t('zip.download')}
         </a>
       </div>
 
@@ -79,7 +84,11 @@ export function DatasetViewer({ job }: DatasetViewerProps) {
         ))}
       </div>
 
-      {!isConversion && <QualityChart clips={clipsData?.clips || []} />}
+      {!isConversion && (
+        <Suspense fallback={<p role="status" className="text-sm text-lo">{t('loading')}</p>}>
+          <QualityChart clips={clipsData?.clips || []} />
+        </Suspense>
+      )}
     </div>
   )
 }

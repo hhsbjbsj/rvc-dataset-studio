@@ -1,3 +1,4 @@
+import { useI18n } from '@/lib/i18n'
 import { useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type RefObject } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import WaveSurfer from 'wavesurfer.js'
@@ -28,6 +29,7 @@ const activeColor = 'rgba(124, 140, 255, 0.40)'
 const regionOptions = { drag: false, contentEditable: false, color: inactiveColor }
 
 export function RvcWaveformRange({ path, player, container, duration, offset, ranges, activeId, busy, canDraw, onChange, onSelect, onNavigate, onSeek }: Props) {
+  const { t } = useI18n()
   const instance = useRef<WaveSurfer | null>(null)
   const regionsRef = useRef<Regions | null>(null)
   const syncing = useRef(false)
@@ -155,20 +157,20 @@ export function RvcWaveformRange({ path, player, container, duration, offset, ra
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-xs text-lo">拖出选区，点击选区可切换编辑目标，点击选区外的波形可跳到对应位置。</p>
-        <label className="flex items-center gap-2 text-xs text-mid">波形缩放
+        <p className="text-xs text-lo">{t('wave.help')}</p>
+        <label className="flex items-center gap-2 text-xs text-mid">{t('wave.zoom')}
           <select className="input-field" value={zoom} disabled={busy || !ready}
             onChange={e => setZoom(Number(e.target.value))}>
-            {[1, 2, 4, 8].map(value => <option key={value} value={value}>{value} 倍</option>)}
+            {[1, 2, 4, 8].map(value => <option key={value} value={value}>{t('multiplier', { number: value })}</option>)}
           </select>
         </label>
       </div>
       <div className={'rvc-waveform min-h-24 rounded-md border border-white/10 bg-black/5 px-2 pt-2' + (busy ? ' pointer-events-none' : '')}
-        role="group" aria-label="音频波形和截取选区" aria-disabled={busy}
+        role="group" aria-label={t('wave.group')} aria-disabled={busy}
         aria-keyshortcuts="Space ArrowUp ArrowDown ArrowLeft ArrowRight Shift+ArrowLeft Shift+ArrowRight Delete Control+Z Control+Y Control+Shift+Z Control+S"
         tabIndex={busy ? -1 : 0} ref={container} onClickCapture={selectRegion} onKeyDown={navigateRegions} />
-      {(waveform.isError || renderError) && <p role="alert" className="text-xs text-mid">波形加载失败，可以继续用起点和终点输入框截取。</p>}
-      {!ready && !waveform.isError && !renderError && <p className="text-xs text-lo">正在加载波形…</p>}
+      {(waveform.isError || renderError) && <p role="alert" className="text-xs text-mid">{t('wave.error')}</p>}
+      {!ready && !waveform.isError && !renderError && <p className="text-xs text-lo">{t('wave.loading')}</p>}
     </div>
   )
 }

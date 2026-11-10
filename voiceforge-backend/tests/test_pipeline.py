@@ -23,7 +23,7 @@ def test_api_health():
     assert resp.status_code == 200
 
 
-@patch("api.routes_jobs.run_pipeline")
+@patch("workers.pipeline.run_pipeline")
 def test_create_job(mock_pipeline):
     mock_pipeline.apply_async.return_value = None
     resp = client.post("/api/jobs/create", json={

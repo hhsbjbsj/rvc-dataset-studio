@@ -2,17 +2,49 @@
 
 import json
 import os
+import re
 import shutil
 import tempfile
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 from processing.rvc_audio import MediaError, WORK_RATE, check_space, ffmpeg, media_path
 from rvc_projects import export_root, new_id
 
 
-def export_dataset(project: dict, entries: list[dict], sample_rate: int) -> dict:
+def _export_result(destination: Path, summary: dict) -> dict:
+    project_id = destination.parent.name
+    export_id = destination.name
+    return {
+        **summary,
+        "export_id": export_id,
+        "directory": str(destination / "wavs"),
+        "download_url": f"/api/rvc/projects/{project_id}/exports/{export_id}",
+    }
+
+
+def list_exports(project_id: str) -> list[dict]:
+    batches = []
+    for archive in export_root(project_id).glob("*/dataset.zip"):
+        destination = archive.parent
+        if not re.fullmatch(r"[0-9a-f]{32}", destination.name) or not archive.is_file():
+            continue
+        try:
+            manifest = json.loads((destination / "metadata.json").read_text(encoding="utf-8"))
+            summary = manifest["dataset"]
+            if not isinstance(summary["created_at"], str) or not {"count", "duration_seconds", "sample_rate"} <= summary.keys():
+                continue
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        batches.append(_export_result(destination, summary))
+    return sorted(batches, key=lambda batch: (batch["created_at"], batch["export_id"]), reverse=True)
+
+
+def export_dataset(
+    project: dict, entries: list[dict], sample_rate: int, *, scope: Literal["selected", "kept"],
+) -> dict:
     if not entries:
         raise MediaError("请先试听并保留需要导出的片段。")
     root = export_root(project["id"])
@@ -44,6 +76,7 @@ def export_dataset(project: dict, entries: list[dict], sample_rate: int) -> dict
 
         summary = {
             "created_at": datetime.now(timezone.utc).isoformat(),
+            "scope": scope,
             "count": len(metadata),
             "duration_seconds": round(seconds, 3),
             "sample_rate": sample_rate, "channels": 1, "codec": "pcm_s16le",
@@ -65,4 +98,4 @@ def export_dataset(project: dict, entries: list[dict], sample_rate: int) -> dict
         destination = root / export_id
         os.replace(stage, destination)
 
-    return {"export_id": export_id, "directory": str(destination / "wavs"), **summary}
+    return _export_result(destination, summary)

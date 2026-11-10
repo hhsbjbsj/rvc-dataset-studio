@@ -6,7 +6,6 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
-import yt_dlp
 
 from processing.rvc_audio import MediaError, ProcessingCancelled
 
@@ -112,6 +111,8 @@ def search_bilibili_page(query: str, page: int) -> dict:
 
 
 def download(url: str, directory: Path, check, update_progress) -> Path:
+    import yt_dlp
+
     platform, url = normalize_url(url)
 
     def hook(data):

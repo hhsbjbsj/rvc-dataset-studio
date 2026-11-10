@@ -67,7 +67,7 @@ export function useJobWebSocket(jobId: string | null) {
       }
     }
 
-    // A dropped socket is not a failed job: the 3 s status poll in HomePage keeps the state right.
+    // The job details page still polls when the progress socket drops.
     ws.onerror = () => console.warn('[dataset-studio] live progress socket error; falling back to polling')
 
     return () => {

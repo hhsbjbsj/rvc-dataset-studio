@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-import pyarrow.parquet as pq
 import soundfile as sf
 
 from processing.audio_utils import (
@@ -147,6 +146,7 @@ def _convert_arrow(
     normalize: bool,
 ) -> list[Path]:
     import pyarrow as pa
+    import pyarrow.parquet as pq
 
     with pa.memory_map(str(input_path), "r") as source:
         table = pa.ipc.open_file(source).read_all()
@@ -211,7 +211,7 @@ def _convert_7z(
 ) -> list[Path]:
     import py7zr
 
-    extract_dir = output_dir / "_7z_extract"
+    extract_dir = unique_path(output_dir / "_7z_extract")
     extract_dir.mkdir(exist_ok=True)
     with py7zr.SevenZipFile(str(input_path), mode="r") as z:
         for name in z.getnames():
@@ -235,7 +235,7 @@ def _convert_archive(
     trim_silence: bool,
     tar: bool = False,
 ) -> list[Path]:
-    extract_dir = output_dir / "_extract"
+    extract_dir = unique_path(output_dir / "_extract")
     extract_dir.mkdir(exist_ok=True)
 
     if tar:

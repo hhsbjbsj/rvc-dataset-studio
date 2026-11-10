@@ -1,3 +1,4 @@
+import { useI18n } from '@/lib/i18n'
 import { BarChart, Bar, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts'
 import type { Clip } from '@/lib/api'
 
@@ -15,6 +16,7 @@ const BUCKETS = [
 ]
 
 export function QualityChart({ clips }: QualityChartProps) {
+  const { t } = useI18n()
   const data = BUCKETS.map((b) => ({ range: b.range, count: 0, fill: b.fill }))
   for (const clip of clips) {
     const q = clip.quality_score || 0
@@ -25,8 +27,8 @@ export function QualityChart({ clips }: QualityChartProps) {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <span className="eyebrow">Quality distribution</span>
-        <span className="font-mono text-[12px] text-lo">{clips.length} clips scored</span>
+        <span className="eyebrow">{t('job.distribution')}</span>
+        <span className="font-mono text-[12px] text-lo">{t('job.scored', { count: clips.length })}</span>
       </div>
       <div className="tile !p-3">
         <ResponsiveContainer width="100%" height={200}>
@@ -55,7 +57,7 @@ export function QualityChart({ clips }: QualityChartProps) {
               }}
               labelStyle={{ color: 'var(--text-hi)' }}
               itemStyle={{ color: 'var(--text-mid)' }}
-              formatter={(value) => [value, 'clips']}
+              formatter={(value) => [value, t('job.clips')]}
             />
             <Bar dataKey="count" radius={[6, 6, 0, 0]} maxBarSize={56}>
               {data.map((entry, i) => (

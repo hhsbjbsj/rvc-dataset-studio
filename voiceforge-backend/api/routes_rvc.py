@@ -6,6 +6,8 @@ from pathlib import Path
 from threading import Lock
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
+from uuid import UUID
+from zipfile import BadZipFile
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse
@@ -14,14 +16,16 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from database import get_db
+from database import Job, get_db
 from processing.rvc_audio import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS, MediaError, probe
 from processing.rvc_edit import (
     create_edit, create_edits, delete_buffered_clips, restore_buffer_audio, source_audio_info, source_audio_path, waveform_peaks,
 )
-from processing.rvc_export import export_dataset
+from processing.rvc_export import export_dataset, list_exports
+from processing.rvc_import import stage_conversion
 from rvc_projects import (
-    RvcClip, RvcMergeBuffer, RvcProject, RvcSource, active_clip, clip_data, clip_path, export_root, project_data, source_data,
+    RvcClip, RvcMergeBuffer, RvcProject, RvcSource, active_clip, clip_data, clip_path, export_root, new_id, project_data,
+    source_data, work_dir,
 )
 from sources.rvc_online import resolve_source_url, search_bilibili_page
 from workers.rvc_worker import update_source
@@ -33,6 +37,7 @@ SampleRate = Literal[16000, 22050, 24000, 32000, 40000, 44100, 48000]
 Identifier = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)]
 picker_lock = Lock()
+conversion_import_lock = Lock()
 # Exports must finish reading selected WAVs before a merge removes them.
 clip_file_lock = Lock()
 
@@ -60,9 +65,14 @@ class LocalImport(BaseModel):
     recursive: bool = False
 
 
+class ConversionImport(BaseModel):
+    split: bool = False
+
+
 class PickerInput(BaseModel):
     kind: SourceKind
     folder: bool = False
+    locale: Literal["zh-CN", "en", "ja"] = "zh-CN"
 
 
 class OnlineVideo(BaseModel):
@@ -190,15 +200,20 @@ def choose_paths(data: PickerInput):
         raise HTTPException(409, "文件选择对话框已经打开。")
     root = None
     try:
+        folder_title, files_title, media_label, all_label = {
+            "zh-CN": ("选择包含素材的文件夹", "选择本地媒体素材", "媒体文件", "所有文件"),
+            "en": ("Choose a source folder", "Choose local media", "Media files", "All files"),
+            "ja": ("素材のフォルダーを選択", "ローカルメディアを選択", "メディアファイル", "すべてのファイル"),
+        }[data.locale]
         root = tk.Tk()
         root.withdraw()
         root.attributes("-topmost", True)
         if data.folder:
-            selected = filedialog.askdirectory(parent=root, mustexist=True, title="选择包含素材的文件夹")
+            selected = filedialog.askdirectory(parent=root, mustexist=True, title=folder_title)
             return {"paths": [selected] if selected else []}
         extensions = VIDEO_EXTENSIONS if data.kind == "local_video" else AUDIO_EXTENSIONS
-        filetypes = [("Media", " ".join("*" + ext for ext in sorted(extensions))), ("All files", "*.*")]
-        return {"paths": list(filedialog.askopenfilenames(parent=root, title="选择本地媒体素材", filetypes=filetypes))}
+        filetypes = [(media_label, " ".join("*" + ext for ext in sorted(extensions))), (all_label, "*.*")]
+        return {"paths": list(filedialog.askopenfilenames(parent=root, title=files_title, filetypes=filetypes))}
     except tk.TclError as exc:
         raise HTTPException(400, "无法打开系统文件对话框，请直接填写完整路径。") from exc
     finally:
@@ -275,6 +290,41 @@ def import_local(project_id: Identifier, data: LocalImport, db: DB):
                             title=path.name, media=media, track_index=media["default_track"])
     db.commit()
     return {"added": added, "duplicates": duplicate + len(staged) - added, "errors": errors}
+
+
+@router.post("/projects/{project_id}/sources/converted/{conversion_id}", status_code=202)
+def import_conversion(project_id: Identifier, conversion_id: UUID, data: ConversionImport, request: Request, db: DB):
+    get_project(db, project_id)
+    job = db.get(Job, str(conversion_id))
+    if job is None or job.query_type != "conversion" or job.status != "done" or not job.output_path:
+        raise HTTPException(404, "找不到可导入的转换结果。")
+    archive = Path(job.output_path)
+    db.close()
+    destination = work_dir(project_id, "converted") / str(conversion_id)
+    options = ProcessInput(split=data.split).model_dump(exclude={"source_ids"})
+    queued = []
+    with conversion_import_lock:
+        try:
+            files = stage_conversion(archive, destination)
+        except FileNotFoundError as exc:
+            raise HTTPException(404, "转换文件已不存在。") from exc
+        except MediaError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except (OSError, BadZipFile) as exc:
+            raise HTTPException(400, "无法读取或保存转换文件。") from exc
+
+        existing = set(db.scalars(select(RvcSource.source_key).where(RvcSource.project_id == project_id)))
+        for path, title in files:
+            key = os.path.normcase(str(path))
+            if key in existing:
+                continue
+            source_id = new_id()
+            if add_source(db, id=source_id, project_id=project_id, kind="local_audio", source_key=key,
+                          origin=str(path), title=title, status="queued", stage="queued", options=options):
+                queued.append(source_id)
+        db.commit()
+    request.app.state.rvc_worker.submit(queued)
+    return {"queued": len(queued), "duplicates": len(files) - len(queued)}
 
 
 @router.get("/search/bilibili")
@@ -545,11 +595,27 @@ def export_project(project_id: Identifier, data: ExportInput, db: DB):
         ]
         db.close()
         try:
-            result = export_dataset(project, entries, data.sample_rate)
+            return export_dataset(project, entries, data.sample_rate, scope="kept" if selected is None else "selected")
         except MediaError as exc:
             raise HTTPException(400, str(exc)) from exc
-        result["download_url"] = f"/api/rvc/projects/{project_id}/exports/{result['export_id']}"
-        return result
+
+
+@router.get("/exports")
+def rvc_export_history(db: DB):
+    projects = [project_data(row) for row in db.scalars(select(RvcProject))]
+    db.close()
+    history = []
+    for project in projects:
+        batches = list_exports(project["id"])
+        if batches:
+            history.append({"project": project, "batches": batches})
+    return sorted(history, key=lambda entry: entry["batches"][0]["created_at"], reverse=True)
+
+
+@router.get("/projects/{project_id}/exports")
+def export_history(project_id: Identifier, db: DB):
+    get_project(db, project_id)
+    return list_exports(project_id)
 
 
 @router.get("/projects/{project_id}/exports/{export_id}")

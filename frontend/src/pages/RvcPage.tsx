@@ -1,10 +1,14 @@
+import { useI18n, type MessageKey } from '@/lib/i18n'
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useSearchParams } from 'react-router-dom'
 import { isAxiosError } from 'axios'
 import { RvcAudioRangeEditor, RvcManualEditor, type AudioRange } from '@/components/RvcManualEditor'
+import { RvcExportList } from '@/components/RvcExportList'
 import { RvcSources, type Project, type RunAction } from '@/components/RvcSources'
 import { api } from '@/lib/api'
 import { API_URL } from '@/lib/config'
+import { timestamp, type ExportBatch } from '@/lib/rvc'
 
 type Track = { index: number; codec: string; sample_rate: number; channels: number; language?: string; title?: string }
 type Source = {
@@ -19,18 +23,21 @@ type Clip = {
 }
 type ManualClip = Clip & { replaced_count?: number }
 type ProjectDetails = Project & { sources: Source[]; review: Partial<Record<Review, { count: number; seconds: number }>> }
-type ExportResult = { directory: string; count: number; duration_seconds: number; download_url: string }
-type ExportBatch = ExportResult & { scope: "selected" | "kept" }
 
 const READY = ['ready', 'failed', 'cancelled']
 const ACTIVE = ['queued', 'running', 'cancelling']
-const STATUS: Record<string, string> = {
-  ready: '待处理', queued: '排队中', running: '处理中', cancelling: '正在取消', cancelled: '已取消',
-  done: '已完成', failed: '失败',
+const STATUS: Record<string, MessageKey> = {
+  ready: 'state.ready', queued: 'state.queued', running: 'state.running', cancelling: 'state.cancelling',
+  cancelled: 'state.cancelled', done: 'state.done', failed: 'state.failed',
 }
-const STAGES: Record<string, string> = { queued: '等待', download: '下载', probe: '识别媒体', extract: '提取音轨', segment: '切分与检查', quality: '去重和保存' }
-const REVIEW = { pending: '待审核', kept: '已保留', excluded: '已剔除' }
-const KIND: Record<string, string> = { local_video: '本地视频', local_audio: '本地音频', bilibili: 'Bilibili', youtube: 'YouTube' }
+const STAGES: Record<string, MessageKey> = {
+  queued: 'stage.queued', download: 'stage.download', probe: 'stage.probe', extract: 'stage.extract',
+  segment: 'stage.segment', quality: 'stage.quality',
+}
+const REVIEW = { pending: 'state.pending', kept: 'state.kept', excluded: 'state.excluded' } as const
+const KIND: Record<string, MessageKey> = {
+  local_video: 'kind.localVideo', local_audio: 'kind.localAudio', bilibili: 'kind.bilibili', youtube: 'kind.youtube',
+}
 const RATES = [16000, 22050, 24000, 32000, 40000, 44100, 48000]
 const MAX_BATCH_SIZE = 1000
 
@@ -44,11 +51,8 @@ function message(error: unknown) {
   return error instanceof Error ? error.message : String(error)
 }
 
-function timestamp(seconds: number) {
-  return Math.floor(seconds / 60) + ':' + (seconds % 60).toFixed(2).padStart(5, '0')
-}
-
 function ProjectWorkspace({ project, busy, run }: { project: Project; busy: boolean; run: RunAction }) {
+  const { t, diagnostic } = useI18n()
   const queryClient = useQueryClient()
   const id = project.id
   const base = '/api/rvc/projects/' + id
@@ -59,7 +63,6 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
   const [page, setPage] = useState(1)
   const [selected, setSelected] = useState<string[]>([])
   const [sampleRate, setSampleRate] = useState(40000)
-  const [exports, setExports] = useState<ExportBatch[]>([])
   const [manualClip, setManualClip] = useState<ManualClip>()
   const [trimTarget, setTrimTarget] = useState<Clip>()
   const [trimResults, setTrimResults] = useState<Clip[]>([])
@@ -76,6 +79,12 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
     queryKey: ['rvc-clips', id, page],
     queryFn: async () => (await api.get<{ clips: Clip[]; total: number }>(base + '/clips', { params: { page } })).data,
   })
+  const exportsKey = ['rvc-exports', id]
+  const exportHistory = useQuery({
+    queryKey: exportsKey,
+    queryFn: async () => (await api.get<ExportBatch[]>(base + '/exports')).data,
+  })
+  const batches = exportHistory.data ?? []
   const bufferKey = ['rvc-merge-buffer', id]
   const buffer = useQuery({
     queryKey: bufferKey,
@@ -102,7 +111,7 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
   const refresh = () => { void queryClient.invalidateQueries({ queryKey: ['rvc-project', id] }) }
 
   function process(sourceIds?: string[]) {
-    run('加入处理队列', async () => {
+    run('rvc.queue', async () => {
       await api.post(base + '/process', {
         source_ids: sourceIds, split, min_seconds: minimum, max_seconds: maximum, normalize,
       })
@@ -111,7 +120,7 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
   }
 
   function review(ids: string[], state: Review) {
-    run('保存审核结果', async () => {
+    run('rvc.saveReview', async () => {
       await api.patch(base + '/clips/review', { ids, review: state })
       setSelected(previous => previous.filter(clipId => !ids.includes(clipId)))
       refresh()
@@ -120,7 +129,7 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
   }
 
   function mergeSelected() {
-    run('合并所选片段', async () => {
+    run('rvc.merge', async () => {
       const { data } = await api.post<ManualClip>(base + '/clips/merge', { clip_ids: selected })
       setSelected([data.id])
       setManualClip(data)
@@ -133,7 +142,7 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
   }
 
   function saveRanges(path: string, ranges: AudioRange[], onSaved: () => void) {
-    run('保存截取选区', async () => {
+    run('rvc.saveRanges', async () => {
       const { data } = await api.post<{ clips: Clip[] }>(base + path, { ranges })
       setSelected(data.clips.map(clip => clip.id))
       setTrimResults(previous => [...previous, ...data.clips.filter(clip => !previous.some(item => item.id === clip.id))])
@@ -145,7 +154,7 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
   }
 
   function updateBufferedClip(clipId: string, restore: boolean) {
-    run(restore ? '恢复片段' : '删除缓冲区片段', async () => {
+    run(restore ? 'rvc.restore' : 'rvc.deleteBuffered', async () => {
       const path = base + '/merge-buffer/' + clipId
       if (restore) {
         await api.post(path + '/restore')
@@ -160,7 +169,7 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
   }
 
   function clearMergeBuffer(clipIds: string[]) {
-    run('清空合并缓冲区', async () => {
+    run('rvc.clearBuffer', async () => {
       await api.delete(base + '/merge-buffer', { data: { clip_ids: clipIds } })
       setBufferDeletion(undefined)
       await queryClient.invalidateQueries({ queryKey: bufferKey })
@@ -168,9 +177,9 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
   }
 
   function exportProject(clipIds?: string[]) {
-    run('生成 ZIP', async () => {
-      const { data } = await api.post<ExportResult>(base + '/export', { sample_rate: sampleRate, clip_ids: clipIds })
-      setExports(previous => [{ ...data, scope: clipIds ? 'selected' : 'kept' }, ...previous])
+    run('rvc.generate', async () => {
+      await api.post(base + '/export', { sample_rate: sampleRate, clip_ids: clipIds })
+      await queryClient.invalidateQueries({ queryKey: ['rvc-exports'] })
     })
   }
 
@@ -184,103 +193,105 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
     <div className="space-y-5">
       <RvcSources project={project} busy={busy} run={run} refresh={refresh} />
       <section className="card space-y-4 p-5" aria-labelledby="rvc-process">
-        <h2 className="text-lg font-semibold text-hi" id="rvc-process">素材和处理进度</h2>
-        <p className="text-sm text-lo">目标合格时长 {project.target_minutes} 分钟。仅将确认属于目标角色的片段标为保留。</p>
-        {details.isError && <p role="alert" className="text-sm text-lo">{message(details.error)}</p>}
-        {details.isLoading && <p className="text-sm text-lo">正在加载素材…</p>}
-        {!details.isLoading && !sources.length && <p className="text-sm text-lo">项目还没有素材。</p>}
+        <h2 className="text-lg font-semibold text-hi" id="rvc-process">{t('rvc.processing')}</h2>
+        <p className="text-sm text-lo">{t('rvc.target', { minutes: project.target_minutes })}</p>
+        {details.isError && <p role="alert" className="text-sm text-lo">{diagnostic(message(details.error))}</p>}
+        {details.isLoading && <p className="text-sm text-lo">{t('rvc.loadingSources')}</p>}
+        {!details.isLoading && !sources.length && <p className="text-sm text-lo">{t('rvc.noSources')}</p>}
         <form className="flex flex-wrap items-end gap-3" onSubmit={e => { e.preventDefault(); process() }}>
           <label className="flex items-center gap-2 py-2 text-sm text-mid">
             <input type="checkbox" checked={split} onChange={e => setSplit(e.target.checked)} />
-            自动切分语音
+            {t('rvc.autoSplit')}
           </label>
           {split && <>
-            <label className="text-sm text-mid">最短（秒）
+            <label className="text-sm text-mid">{t('rvc.min')}
               <input className="input-field mt-1 block w-24" type="number" value={minimum} min={0.15} max={60} step="any" required
                 onChange={e => setMinimum(Number(e.target.value))} />
             </label>
-            <label className="text-sm text-mid">最长（秒）
+            <label className="text-sm text-mid">{t('rvc.max')}
               <input className="input-field mt-1 block w-24" type="number" value={maximum} min={minimum} max={120} step="any" required
                 onChange={e => setMaximum(Number(e.target.value))} />
             </label>
           </>}
           <label className="flex items-center gap-2 py-2 text-sm text-mid">
             <input type="checkbox" checked={normalize} onChange={e => setNormalize(e.target.checked)} />
-            峰值调整
+            {t('rvc.peak')}
           </label>
-          <button className="btn btn-primary" disabled={busy || !sources.some(source => READY.includes(source.status))}>处理待处理和失败素材</button>
+          <button className="btn btn-primary" disabled={busy || !sources.some(source => READY.includes(source.status))}>{t('rvc.process')}</button>
         </form>
         <ul className="divide-y divide-white/10">
           {sources.map(source => (
             <li key={source.id} className="flex flex-wrap items-center justify-between gap-3 py-3">
               <div className="min-w-0 flex-1">
                 <p className="break-all text-sm font-medium text-hi">{source.title}</p>
-                <p className="break-all text-xs text-lo">{KIND[source.kind]} · {source.origin}</p>
+                <p className="break-all text-xs text-lo">{KIND[source.kind] ? t(KIND[source.kind]) : source.kind} · {source.origin}</p>
                 <p className="text-xs text-mid">
-                  {STATUS[source.status]}{source.stage && ' · ' + STAGES[source.stage] + ' ' + source.progress + '%'}
+                  {STATUS[source.status] ? t(STATUS[source.status]) : source.status}
+                  {source.stage && ' · ' + (STAGES[source.stage] ? t(STAGES[source.stage]) : source.stage) + ' ' + source.progress + '%'}
                   {source.media.duration ? ' · ' + timestamp(source.media.duration) : ''}
-                  {source.duplicate_clips ? ' · 去重 ' + source.duplicate_clips + ' 段' : ''}
+                  {source.duplicate_clips ? ' · ' + t('rvc.duplicates', { count: source.duplicate_clips }) : ''}
                 </p>
-                {source.error && <p className="mt-1 break-all text-sm text-mid">{source.error}</p>}
+                {source.error && <p className="mt-1 break-all text-sm text-mid">{diagnostic(source.error)}</p>}
               </div>
               {source.media.tracks && source.media.tracks.length > 0 && (
-                <select aria-label={source.title + ' 音轨'} className="input-field max-w-56" value={source.track_index ?? ''}
+                <select aria-label={t('rvc.trackAria', { title: source.title })} className="input-field max-w-56" value={source.track_index ?? ''}
                   disabled={busy || !READY.includes(source.status)}
                   onChange={e => {
                     const index = Number(e.target.value)
-                    run('选择音轨', async () => { await api.patch(base + '/sources/' + source.id + '/track', { index }); refresh() })
+                    run('rvc.chooseTrack', async () => { await api.patch(base + '/sources/' + source.id + '/track', { index }); refresh() })
                   }}>
                   {source.media.tracks.map(track => (
                     <option key={track.index} value={track.index}>
-                      音轨 {track.index} {track.title || track.language || ''} · {track.codec} · {track.sample_rate} Hz · {track.channels} 声道
+                      {t('rvc.track', { index: track.index, name: track.title || track.language || '',
+                        codec: track.codec, rate: track.sample_rate, channels: track.channels })}
                     </option>
                   ))}
                 </select>
               )}
               {(source.status === 'queued' || source.status === 'running') && (
                 <button className="btn btn-secondary btn-sm" disabled={busy}
-                  onClick={() => run('取消素材处理', async () => { await api.post(base + '/sources/' + source.id + '/cancel'); refresh() })}>取消</button>
+                  onClick={() => run('rvc.cancelSource', async () => { await api.post(base + '/sources/' + source.id + '/cancel'); refresh() })}>{t('cancel')}</button>
               )}
               {(source.status === 'failed' || source.status === 'cancelled') && (
-                <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => process([source.id])}>重试</button>
+                <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => process([source.id])}>{t('retry')}</button>
               )}
             </li>
           ))}
         </ul>
       </section>
       <section className="card space-y-4 p-5" aria-labelledby="rvc-review">
-        <h2 className="text-lg font-semibold text-hi" id="rvc-review">试听和审核</h2>
+        <h2 className="text-lg font-semibold text-hi" id="rvc-review">{t('rvc.review')}</h2>
         <p className="text-sm text-lo">
-          待审核 {details.data?.review.pending?.count ?? 0} 段 · 已保留 {details.data?.review.kept?.count ?? 0} 段
-          {' · '}合格时长 {timestamp(details.data?.review.kept?.seconds ?? 0)} / {project.target_minutes} 分钟
+          {t('rvc.reviewTotals', { pending: details.data?.review.pending?.count ?? 0, kept: details.data?.review.kept?.count ?? 0,
+            duration: timestamp(details.data?.review.kept?.seconds ?? 0), target: project.target_minutes })}
         </p>
         <RvcManualEditor base={base} sources={sources.filter(source => source.status === 'done')} busy={busy} run={run}
           onSave={(sourceId, ranges, onSaved) => saveRanges('/sources/' + sourceId + '/clips', ranges, onSaved)} />
         {manualClip && (
-          <div className="hairline-b space-y-2 pb-4" aria-label="手工片段结果">
+          <div className="hairline-b space-y-2 pb-4" aria-label={t('rvc.manualResult')}>
             <p className="text-sm text-hi" role="status">
               {manualClip.replaced_count === undefined
-                ? '手工片段已就绪'
-                : '合并完成，已将 ' + manualClip.replaced_count + ' 段旧片段移入缓冲区'}
+                ? t('rvc.manualReady')
+                : t('rvc.merged', { count: manualClip.replaced_count })}
               {' · '}{timestamp(manualClip.start)}–{timestamp(manualClip.end)}
             </p>
             {trimTarget?.id !== manualClip.id && (
               <div className="flex flex-wrap items-center gap-2">
-                <audio className="h-9 max-w-full" controls preload="none" aria-label="试听手工片段"
+                <audio className="h-9 max-w-full" controls preload="none" aria-label={t('rvc.previewManual')}
                   src={API_URL + base + '/clips/' + manualClip.id + '/audio'} />
-                <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => setTrimTarget(manualClip)}>从这段截取</button>
+                <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => setTrimTarget(manualClip)}>{t('rvc.trimThis')}</button>
               </div>
             )}
-            <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => setSelected([manualClip.id])}>只勾选这个手工片段</button>
+            <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => setSelected([manualClip.id])}>{t('rvc.onlyThis')}</button>
           </div>
         )}
         {trimTarget && (
-          <div ref={trimPanel} className="hairline-b scroll-mt-24 space-y-3 pb-4" aria-label="从片段截取">
+          <div ref={trimPanel} className="hairline-b scroll-mt-24 space-y-3 pb-4" aria-label={t('rvc.trimClip')}>
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <h3 className="font-medium text-hi">从片段截取</h3>
-              <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => setTrimTarget(undefined)}>关闭截取</button>
+              <h3 className="font-medium text-hi">{t('rvc.trimClip')}</h3>
+              <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => setTrimTarget(undefined)}>{t('rvc.closeTrim')}</button>
             </div>
-            <p className="text-sm text-lo">{trimTarget.source_title} · 原素材 {timestamp(trimTarget.start)}–{timestamp(trimTarget.end)}</p>
+            <p className="text-sm text-lo">{trimTarget.source_title} · {t('rvc.originalRange', { start: timestamp(trimTarget.start), end: timestamp(trimTarget.end) })}</p>
             <RvcAudioRangeEditor key={trimTarget.id} offset={0} duration={trimTarget.duration} busy={busy} fromClip
               audioUrl={API_URL + base + '/clips/' + trimTarget.id + '/audio'}
               waveformPath={base + '/clips/' + trimTarget.id + '/waveform'}
@@ -288,15 +299,15 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
           </div>
         )}
         {!!trimResults.length && (
-          <div className="hairline-b space-y-2 pb-4" aria-label="截取结果">
-            <p className="text-sm font-medium text-hi" role="status">本次已截取 {trimResults.length} 段</p>
+          <div className="hairline-b space-y-2 pb-4" aria-label={t('rvc.trimResults')}>
+            <p className="text-sm font-medium text-hi" role="status">{t('rvc.trimCount', { count: trimResults.length })}</p>
             <ul className="space-y-2">
               {trimResults.map((clip, index) => (
                 <li key={clip.id} className="flex flex-wrap items-center gap-2 text-sm text-mid">
-                  <input type="checkbox" aria-label={'勾选截取结果 ' + (index + 1)} checked={selected.includes(clip.id)} disabled={busy}
+                  <input type="checkbox" aria-label={t('rvc.selectTrim', { number: index + 1 })} checked={selected.includes(clip.id)} disabled={busy}
                     onChange={e => selectClip(clip.id, e.target.checked)} />
-                  <span>第 {index + 1} 段 · 原素材 {timestamp(clip.start)}–{timestamp(clip.end)}</span>
-                  <audio className="h-9 max-w-full" controls preload="none" aria-label={'试听截取结果 ' + (index + 1)}
+                  <span>{t('rvc.trimNumber', { number: index + 1 })} · {t('rvc.originalRange', { start: timestamp(clip.start), end: timestamp(clip.end) })}</span>
+                  <audio className="h-9 max-w-full" controls preload="none" aria-label={t('rvc.previewTrim', { number: index + 1 })}
                     src={API_URL + base + '/clips/' + clip.id + '/audio'} />
                 </li>
               ))}
@@ -308,26 +319,26 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
           if (!e.currentTarget.open) setBufferDeletion(undefined)
         }}>
           <summary className="cursor-pointer font-medium text-hi">
-            合并缓冲区{buffer.data ? '（' + buffer.data.clips.length + ' 段）' : ''}
+            {buffer.data ? t('rvc.bufferCount', { count: buffer.data.clips.length }) : t('rvc.buffer')}
           </summary>
           {bufferOpen && (
             <div className="space-y-3">
-              <p className="text-sm text-lo">试听合并前的旧片段。恢复会把旧片段放回审核列表，确认删除会永久移除该片段。</p>
-              {buffer.isError && <p role="alert" className="text-sm text-mid">{message(buffer.error)}</p>}
-              {buffer.isLoading && <p className="text-sm text-lo">正在加载缓冲区…</p>}
-              {buffer.data?.clips.length === 0 && <p className="text-sm text-lo">缓冲区为空。</p>}
+              <p className="text-sm text-lo">{t('rvc.bufferHelp')}</p>
+              {buffer.isError && <p role="alert" className="text-sm text-mid">{diagnostic(message(buffer.error))}</p>}
+              {buffer.isLoading && <p className="text-sm text-lo">{t('rvc.bufferLoading')}</p>}
+              {buffer.data?.clips.length === 0 && <p className="text-sm text-lo">{t('rvc.bufferEmpty')}</p>}
               {clearBufferIds ? (
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-sm text-mid">永久删除缓冲区中的 {clearBufferIds.length} 段旧音频？</span>
+                  <span className="text-sm text-mid">{t('rvc.clearQuestion', { count: clearBufferIds.length })}</span>
                   <button className="btn btn-danger btn-sm" disabled={busy} onClick={event => {
                     event.currentTarget.closest('details')?.querySelectorAll('audio').forEach(audio => audio.pause())
                     clearMergeBuffer(clearBufferIds)
-                  }}>确认清空</button>
-                  <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => setBufferDeletion(undefined)}>取消</button>
+                  }}>{t('rvc.confirmClear')}</button>
+                  <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => setBufferDeletion(undefined)}>{t('cancel')}</button>
                 </div>
               ) : bufferedClips.length > 0 && (
                 <button className="btn btn-danger btn-sm" disabled={busy}
-                  onClick={() => setBufferDeletion(bufferedClips.map(clip => clip.id))}>清空缓冲区…</button>
+                  onClick={() => setBufferDeletion(bufferedClips.map(clip => clip.id))}>{t('rvc.clearPrompt')}</button>
               )}
               <ul className="space-y-3">
                 {bufferedClips.map(clip => (
@@ -337,16 +348,16 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
                     </p>
                     {bufferDeletion === clip.id ? (
                       <div className="flex flex-wrap items-center gap-2">
-                        <span className="text-sm text-mid">永久删除这段音频？</span>
-                        <button className="btn btn-danger btn-sm" disabled={busy} onClick={() => updateBufferedClip(clip.id, false)}>确认删除</button>
-                        <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => setBufferDeletion(undefined)}>取消</button>
+                        <span className="text-sm text-mid">{t('rvc.deleteQuestion')}</span>
+                        <button className="btn btn-danger btn-sm" disabled={busy} onClick={() => updateBufferedClip(clip.id, false)}>{t('rvc.confirmDelete')}</button>
+                        <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => setBufferDeletion(undefined)}>{t('cancel')}</button>
                       </div>
                     ) : (
                       <>
-                        <audio className="h-9 max-w-full" controls preload="none" aria-label={'试听缓冲区片段 ' + timestamp(clip.start)}
+                        <audio className="h-9 max-w-full" controls preload="none" aria-label={t('rvc.previewBuffer', { time: timestamp(clip.start) })}
                           src={API_URL + base + '/clips/' + clip.id + '/audio'} />
-                        <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => updateBufferedClip(clip.id, true)}>恢复到列表</button>
-                        <button className="btn btn-danger btn-sm" disabled={busy} onClick={() => setBufferDeletion(clip.id)}>删除…</button>
+                        <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => updateBufferedClip(clip.id, true)}>{t('rvc.restoreList')}</button>
+                        <button className="btn btn-danger btn-sm" disabled={busy} onClick={() => setBufferDeletion(clip.id)}>{t('rvc.deletePrompt')}</button>
                       </>
                     )}
                   </li>
@@ -355,77 +366,75 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
             </div>
           )}
         </details>
-        {clipPage.isError && <p role="alert" className="text-sm text-lo">{message(clipPage.error)}</p>}
-        {!clipPage.data?.clips.length && <p className="text-sm text-lo">处理完成后，片段会出现在这里。</p>}
+        {clipPage.isError && <p role="alert" className="text-sm text-lo">{diagnostic(message(clipPage.error))}</p>}
+        {!clipPage.data?.clips.length && <p className="text-sm text-lo">{t('rvc.noClips')}</p>}
         {!!(clipPage.data?.clips.length || selected.length) && (
           <div className="flex flex-wrap items-center gap-2">
             <button className="btn btn-secondary btn-sm" disabled={busy || !clipPage.data?.clips.length}
               onClick={() => {
                 const ids = clipPage.data?.clips.map(clip => clip.id) ?? []
                 setSelected(previous => [...new Set([...previous, ...ids])])
-              }}>选择本页</button>
-            <button className="btn btn-secondary btn-sm" disabled={busy || !selected.length} onClick={() => setSelected([])}>清除选择</button>
-            <button className="btn btn-secondary btn-sm" disabled={busy || !hasSelection} onClick={() => review(selected, 'kept')}>保留所选</button>
-            <button className="btn btn-danger btn-sm" disabled={busy || !hasSelection} onClick={() => review(selected, 'excluded')}>剔除所选</button>
+              }}>{t('rvc.selectPage')}</button>
+            <button className="btn btn-secondary btn-sm" disabled={busy || !selected.length} onClick={() => setSelected([])}>{t('rvc.clearSelection')}</button>
+            <button className="btn btn-secondary btn-sm" disabled={busy || !hasSelection} onClick={() => review(selected, 'kept')}>{t('rvc.keepSelected')}</button>
+            <button className="btn btn-danger btn-sm" disabled={busy || !hasSelection} onClick={() => review(selected, 'excluded')}>{t('rvc.excludeSelected')}</button>
             <button className="btn btn-secondary btn-sm" disabled={busy || !hasSelection || selected.length < 2}
-              onClick={mergeSelected}>合并所选片段</button>
-            <span className="text-sm text-mid" aria-live="polite">已勾选 {selected.length} 段</span>
-            {selected.length >= 2 && <p className="w-full text-xs text-lo">同一素材中的片段可合并。合并成功后，所选旧片段会移入缓冲区。新片段保留起点到终点之间的原音。</p>}
+              onClick={mergeSelected}>{t('rvc.merge')}</button>
+            <span className="text-sm text-mid" aria-live="polite">{t('rvc.selected', { count: selected.length })}</span>
+            {selected.length >= 2 && <p className="w-full text-xs text-lo">{t('rvc.mergeHelp')}</p>}
           </div>
         )}
-        {!!(clipPage.data?.total || selected.length || exports.length) && (
-          <div className="hairline-b space-y-3 pb-4" aria-label="导出 RVC 数据集">
-            <p className="text-sm text-lo">勾选会跨页保留。每次导出生成独立 ZIP，包含单声道 16-bit PCM WAV。</p>
-            {selected.length > MAX_BATCH_SIZE && <p className="text-sm text-mid">每批最多处理 {MAX_BATCH_SIZE} 段，请减少勾选后再试。</p>}
+        {!!(clipPage.data?.total || selected.length) && (
+          <div className="space-y-3" aria-label={t('rvc.export')}>
+            <p className="text-sm text-lo">{t('rvc.exportHelp')}</p>
+            {selected.length > MAX_BATCH_SIZE && <p className="text-sm text-mid">{t('rvc.batchLimit', { count: MAX_BATCH_SIZE })}</p>}
             <div className="flex flex-wrap items-end gap-3">
-              <label className="text-sm text-mid">采样率
+              <label className="text-sm text-mid">{t('sampleRate')}
                 <select className="input-field mt-1 block" value={sampleRate} disabled={busy} onChange={e => setSampleRate(Number(e.target.value))}>
                   {RATES.map(rate => <option key={rate} value={rate}>{rate} Hz</option>)}
                 </select>
               </label>
-              <button className="btn btn-primary" disabled={busy || !hasSelection} onClick={() => exportProject(selected)}>导出所选片段</button>
-              <button className="btn btn-secondary" disabled={busy || !details.data?.review.kept?.count} onClick={() => exportProject()}>导出已保留片段</button>
+              <button className="btn btn-primary" disabled={busy || !hasSelection} onClick={() => exportProject(selected)}>{t('rvc.exportSelected')}</button>
+              <button className="btn btn-secondary" disabled={busy || !details.data?.review.kept?.count} onClick={() => exportProject()}>{t('rvc.exportKept')}</button>
             </div>
-            {!!exports.length && (
-              <ul className="space-y-2" aria-label="本次导出记录" aria-live="polite">
-                {exports.map((batch, index) => (
-                  <li className="flex flex-wrap items-center gap-2 text-sm text-mid" key={batch.download_url}>
-                    <span>第 {exports.length - index} 批 · {batch.scope === 'selected' ? '所选片段' : '已保留片段'} · {batch.count} 段 · {timestamp(batch.duration_seconds)}</span>
-                    <a className="btn btn-secondary btn-sm" href={API_URL + batch.download_url}>下载 ZIP</a>
-                    <p className="w-full break-all text-xs text-lo">{batch.directory}</p>
-                  </li>
-                ))}
-              </ul>
-            )}
           </div>
         )}
+        <section className="hairline-b space-y-2 pb-4" aria-label={t('rvc.exports')}>
+          <h3 className="text-sm font-semibold text-hi">{t('rvc.exports')}</h3>
+          {exportHistory.isPending && <p className="text-sm text-lo">{t('rvc.loadingExports')}</p>}
+          {exportHistory.isError && <p role="alert" className="text-sm text-lo">{t('rvc.exportsFailed')}{' ' + diagnostic(message(exportHistory.error))}</p>}
+          {exportHistory.isSuccess && !batches.length && <p className="text-sm text-lo">{t('rvc.noExports')}</p>}
+          {!!batches.length && <RvcExportList batches={batches} />}
+        </section>
         <ul className="space-y-3">
           {clipPage.data?.clips.map(clip => (
             <li key={clip.id} className="hairline-b flex flex-wrap items-center gap-3 pb-3">
-              <input type="checkbox" aria-label={'选择片段 ' + timestamp(clip.start)} checked={selected.includes(clip.id)} disabled={busy}
+              <input type="checkbox" aria-label={t('rvc.selectClip', { time: timestamp(clip.start) })} checked={selected.includes(clip.id)} disabled={busy}
                 onChange={e => selectClip(clip.id, e.target.checked)} />
               <div className="min-w-52 flex-1">
                 <p className="break-all text-sm text-hi">{clip.source_title} · {timestamp(clip.start)}–{timestamp(clip.end)}</p>
                 <p className="break-all text-xs text-lo">{clip.origin}</p>
-                <p className="text-xs text-mid">{REVIEW[clip.review]}{clip.quality.edit && (clip.quality.edit === 'merge' ? ' · 手工合并' : ' · 手工截取')} · {clip.duration.toFixed(2)} 秒 · 质量 {clip.quality.score}/100 · SNR {clip.quality.snr_db} dB</p>
+                <p className="text-xs text-mid">{t(REVIEW[clip.review])}{clip.quality.edit && ' · ' + t(clip.quality.edit === 'merge' ? 'rvc.manualMerge' : 'rvc.manualTrim')} · {t('rvc.clipStats', {
+                  duration: clip.duration.toFixed(2), score: clip.quality.score, snr: clip.quality.snr_db,
+                })}</p>
               </div>
-              <audio className="h-9 max-w-full" controls preload="none" aria-label={'试听 ' + clip.source_title + ' ' + timestamp(clip.start)}
+              <audio className="h-9 max-w-full" controls preload="none" aria-label={t('rvc.previewClip', { title: clip.source_title, time: timestamp(clip.start) })}
                 src={API_URL + base + '/clips/' + clip.id + '/audio'} />
               <div className="flex flex-wrap gap-2">
-                <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => setTrimTarget(clip)}>从这段截取</button>
-                {clip.review !== 'kept' && <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => review([clip.id], 'kept')}>保留</button>}
-                {clip.review !== 'excluded' && <button className="btn btn-danger btn-sm" disabled={busy} onClick={() => review([clip.id], 'excluded')}>剔除</button>}
-                {clip.review !== 'pending' && <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => review([clip.id], 'pending')}>撤销审核</button>}
+                <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => setTrimTarget(clip)}>{t('rvc.trimThis')}</button>
+                {clip.review !== 'kept' && <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => review([clip.id], 'kept')}>{t('rvc.keep')}</button>}
+                {clip.review !== 'excluded' && <button className="btn btn-danger btn-sm" disabled={busy} onClick={() => review([clip.id], 'excluded')}>{t('rvc.exclude')}</button>}
+                {clip.review !== 'pending' && <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => review([clip.id], 'pending')}>{t('rvc.undoReview')}</button>}
               </div>
             </li>
           ))}
         </ul>
         {(clipPage.data?.total ?? 0) > 100 && (
           <div className="flex items-center gap-3 text-sm text-lo">
-            <button className="btn btn-secondary btn-sm" disabled={page <= 1} onClick={() => setPage(page - 1)}>上一页</button>
-            <span>第 {page} 页，共 {clipPage.data?.total} 段</span>
+            <button className="btn btn-secondary btn-sm" disabled={page <= 1} onClick={() => setPage(page - 1)}>{t('previousPage')}</button>
+            <span>{t('rvc.page', { page, count: clipPage.data?.total ?? 0 })}</span>
             <button className="btn btn-secondary btn-sm" disabled={page * 100 >= (clipPage.data?.total ?? 0)}
-              onClick={() => setPage(page + 1)}>下一页</button>
+              onClick={() => setPage(page + 1)}>{t('nextPage')}</button>
           </div>
         )}
       </section>
@@ -434,14 +443,16 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
 }
 
 export function RvcPage() {
+  const { t, diagnostic } = useI18n()
   const queryClient = useQueryClient()
   const projects = useQuery({ queryKey: ['rvc-projects'], queryFn: async () => (await api.get<Project[]>('/api/rvc/projects')).data })
-  const [selected, setSelected] = useState('')
+  const [params, setParams] = useSearchParams()
+  const selected = params.get('project')
   const [series, setSeries] = useState('')
   const [character, setCharacter] = useState('')
   const [language, setLanguage] = useState('中文')
   const [target, setTarget] = useState(20)
-  const [busy, setBusy] = useState('')
+  const [busy, setBusy] = useState<MessageKey>()
   const [error, setError] = useState('')
   const project = projects.data?.find(item => item.id === selected) ?? projects.data?.[0]
 
@@ -449,15 +460,15 @@ export function RvcPage() {
     if (busy) return
     setBusy(label)
     setError('')
-    void action().catch(e => setError(message(e))).finally(() => setBusy(''))
+    void action().catch(e => setError(message(e))).finally(() => setBusy(undefined))
   }
 
   function create(event: FormEvent) {
     event.preventDefault()
-    run('创建角色项目', async () => {
+    run('rvc.create', async () => {
       const { data } = await api.post<Project>('/api/rvc/projects', { series, character, language, target_minutes: target })
       await queryClient.invalidateQueries({ queryKey: ['rvc-projects'] })
-      setSelected(data.id)
+      setParams({ project: data.id }, { replace: true })
       setCharacter('')
     })
   }
@@ -465,38 +476,41 @@ export function RvcPage() {
   return (
     <div className="shell max-w-content space-y-5 py-8">
       <div>
-        <h1 className="text-3xl font-semibold tracking-tight text-hi">RVC 数据集项目</h1>
-        <p className="mt-2 text-sm text-lo">把同一角色的在线素材、本地视频和本地音频集中处理、审核和导出。</p>
+        <h1 className="text-3xl font-semibold tracking-tight text-hi">{t('rvc.title')}</h1>
+        <p className="mt-2 text-sm text-lo">{t('rvc.subtitle')}</p>
       </div>
       <section className="card space-y-4 p-5" aria-labelledby="rvc-project">
-        <h2 className="text-lg font-semibold text-hi" id="rvc-project">角色项目</h2>
-        {projects.isError && <p role="alert" className="text-sm text-lo">{message(projects.error)}</p>}
+        <h2 className="text-lg font-semibold text-hi" id="rvc-project">{t('rvc.projects')}</h2>
+        {projects.isError && <p role="alert" className="text-sm text-lo">{diagnostic(message(projects.error))}</p>}
         {project && (
-          <label className="block text-sm text-mid">当前项目
-            <select className="input-field mt-1 block w-full" value={project.id} disabled={!!busy} onChange={e => { setSelected(e.target.value); setError('') }}>
+          <label className="block text-sm text-mid">{t('rvc.current')}
+            <select className="input-field mt-1 block w-full" value={project.id} disabled={!!busy} onChange={event => {
+              setParams({ project: event.target.value }, { replace: true })
+              setError('')
+            }}>
               {projects.data?.map(item => <option key={item.id} value={item.id}>{item.series} · {item.character} · {item.language}</option>)}
             </select>
           </label>
         )}
         <form className="flex flex-wrap items-end gap-3" onSubmit={create}>
-          <label className="flex-1 text-sm text-mid">作品名称
+          <label className="flex-1 text-sm text-mid">{t('rvc.series')}
             <input className="input-field mt-1 block w-full" value={series} maxLength={120} required onChange={e => setSeries(e.target.value)} />
           </label>
-          <label className="flex-1 text-sm text-mid">角色名称
+          <label className="flex-1 text-sm text-mid">{t('rvc.character')}
             <input className="input-field mt-1 block w-full" value={character} maxLength={120} required onChange={e => setCharacter(e.target.value)} />
           </label>
-          <label className="text-sm text-mid">配音语言
+          <label className="text-sm text-mid">{t('rvc.voiceLanguage')}
             <input className="input-field mt-1 block w-24" value={language} maxLength={40} required onChange={e => setLanguage(e.target.value)} />
           </label>
-          <label className="text-sm text-mid">目标分钟
+          <label className="text-sm text-mid">{t('rvc.targetMinutes')}
             <input className="input-field mt-1 block w-24" type="number" value={target} min={0.1} max={1440} step="any" required onChange={e => setTarget(Number(e.target.value))} />
           </label>
-          <button className="btn btn-primary" disabled={!!busy}>新建项目</button>
+          <button className="btn btn-primary" disabled={!!busy}>{t('rvc.newProject')}</button>
         </form>
       </section>
       {(busy || error) && (
         <div className="glass sticky top-16 z-40 px-3 py-2 text-sm text-hi" role={error ? 'alert' : 'status'}>
-          {error || busy + '…'}
+          {error ? diagnostic(error) : busy && t(busy) + '…'}
         </div>
       )}
       {project && <ProjectWorkspace key={project.id} project={project} busy={!!busy} run={run} />}

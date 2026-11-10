@@ -34,7 +34,9 @@ Push-Location $Frontend
 try {
     & npm.cmd ci --no-audit --no-fund
     if ($LASTEXITCODE -ne 0) { throw 'Frontend package installation failed.' }
+    & npm.cmd run build
+    if ($LASTEXITCODE -ne 0) { throw 'Frontend build failed.' }
 } finally {
     Pop-Location
 }
-Write-Host 'Setup complete. Run start-rvc.ps1, then open http://127.0.0.1:5173/rvc.'
+Write-Host 'Setup complete. Open RvcLauncher.exe or use start-rvc.ps1 for development.'

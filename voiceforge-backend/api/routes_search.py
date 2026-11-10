@@ -7,7 +7,6 @@ from fastapi import APIRouter, HTTPException
 from schemas import SearchPreviewRequest, SearchPreviewResponse, SourceFound
 from resolvers.character_resolver import resolve_character
 from sources.huggingface import search_huggingface
-from sources.youtube import search_youtube
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +40,8 @@ async def search_preview(request: SearchPreviewRequest):
         logger.warning("HuggingFace search failed: %s", e)
 
     try:
+        from sources.youtube import search_youtube
+
         yt_results = await search_youtube(request.query, request.query_type, character_info)
         if yt_results:
             total_duration = sum(v.get("duration", 0) for v in yt_results) / 60

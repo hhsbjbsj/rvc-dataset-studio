@@ -1,10 +1,15 @@
+import { jobStatusKey, useI18n } from '@/lib/i18n'
 import { useQuery } from '@tanstack/react-query'
-import { Link, useNavigate } from 'react-router-dom'
-import { Download, RefreshCw, Trash2, Clock, Layers, Eye, Calendar, Loader2, ArrowRight } from 'lucide-react'
+import { Link } from 'react-router-dom'
+import { Download, RefreshCw, Trash2, Clock, Layers, Eye, Calendar, Loader2 } from 'lucide-react'
 import toast from 'react-hot-toast'
-import { api, getHistory, type HistoryItem } from '@/lib/api'
-import { useAppStore, type UIState } from '@/store/appStore'
+import { api, getHistory } from '@/lib/api'
 import { BrandMark } from '@/components/BrandMark'
+import { RvcExportList } from '@/components/RvcExportList'
+import type { Project } from '@/components/RvcSources'
+import type { ExportBatch } from '@/lib/rvc'
+
+type RvcExportGroup = { project: Project; batches: ExportBatch[] }
 
 const ACTIVE = ['queued', 'searching', 'downloading', 'processing', 'packaging']
 
@@ -23,34 +28,25 @@ function dotClass(status: string) {
 }
 
 export function HistoryPage() {
-  const navigate = useNavigate()
-  const { setCurrentJobId, setUiState, setQuery, setQueryType, setLanguage } = useAppStore()
-
+  const { t, locale } = useI18n()
   const { data: history, refetch, isLoading, isError, isFetching } = useQuery({
     queryKey: ['history'],
     queryFn: getHistory,
     refetchInterval: 10000,
   })
-
-  const handleViewJob = (job: HistoryItem) => {
-    setCurrentJobId(job.id)
-    setQuery(job.query)
-    setQueryType(job.query_type)
-    setLanguage(job.language || '')
-    if (job.status === 'done') setUiState('done')
-    else if (job.status === 'failed') setUiState('failed')
-    else setUiState((ACTIVE.includes(job.status) ? job.status : 'processing') as UIState)
-    navigate('/')
-  }
+  const rvcHistory = useQuery({
+    queryKey: ['rvc-exports'],
+    queryFn: async () => (await api.get<RvcExportGroup[]>('/api/rvc/exports')).data,
+  })
 
   const handleDelete = async (id: string) => {
-    if (!window.confirm('Delete this job and all of its audio files?')) return
+    if (!window.confirm(t('history.confirm'))) return
     try {
       await api.delete(`/api/jobs/${id}`)
-      toast.success('Job deleted')
+      toast.success(t('history.deleted'))
       refetch()
     } catch {
-      toast.error('Delete failed')
+      toast.error(t('history.deleteFailed'))
     }
   }
 
@@ -58,76 +54,96 @@ export function HistoryPage() {
     <div className="shell max-w-4xl space-y-8 pb-12 animate-slideIn">
       <div className="flex flex-wrap items-end justify-between gap-4 pt-10 sm:pt-14">
         <div>
-          <span className="eyebrow">History</span>
-          <h1 className="display mt-4 text-[36px] sm:text-[48px]">Your datasets.</h1>
-          <p className="mt-3 text-[15px] text-mid">Every build and conversion, ready to download again.</p>
+          <span className="eyebrow">{t('nav.history')}</span>
+          <h1 className="display mt-4 text-[36px] sm:text-[48px]">{t('history.title')}</h1>
+          <p className="mt-3 text-[15px] text-mid">{t('history.subtitle')}</p>
         </div>
-        <button onClick={() => refetch()} className="btn-secondary btn-sm">
-          <RefreshCw className={`h-3.5 w-3.5 ${isFetching ? 'animate-spin' : ''}`} strokeWidth={1.75} /> Refresh
+        <button onClick={() => {
+          void refetch()
+          void rvcHistory.refetch()
+        }} className="btn-secondary btn-sm">
+          <RefreshCw className={`h-3.5 w-3.5 ${isFetching || rvcHistory.isFetching ? 'animate-spin' : ''}`} strokeWidth={1.75} /> {t('history.refresh')}
         </button>
       </div>
 
+      <section className="space-y-3" aria-labelledby="rvc-history-title">
+        <h2 className="text-lg font-semibold text-hi" id="rvc-history-title">{t('history.rvc')}</h2>
+        {rvcHistory.isPending && <p className="text-sm text-lo">{t('history.rvcLoading')}</p>}
+        {rvcHistory.isError && <p role="alert" className="text-sm text-lo">{t('history.rvcError')}</p>}
+        {rvcHistory.isSuccess && !rvcHistory.data.length && <p className="text-sm text-lo">{t('history.rvcEmpty')}</p>}
+        {rvcHistory.data?.map(({ project, batches }) => (
+          <article className="card space-y-3 !p-5" key={project.id}>
+            <h3 className="break-all text-base font-medium text-hi">{project.character}</h3>
+            <p className="break-all text-xs text-lo">{project.series} · {project.language}</p>
+            <RvcExportList batches={batches} />
+          </article>
+        ))}
+      </section>
+
+      <h2 className="text-lg font-semibold text-hi">{t('history.legacy')}</h2>
       {isLoading ? (
         <div className="flex flex-col items-center justify-center gap-3 py-20 text-lo">
           <Loader2 className="h-6 w-6 animate-spin text-accent" />
-          <span className="eyebrow">Loading history</span>
+          <span className="eyebrow">{t('history.loading')}</span>
         </div>
       ) : isError ? (
         <div className="card text-center text-[14px] text-mid">
-          The backend is not reachable. Start it with the start script, then refresh.
+          {t('health.start')}
         </div>
       ) : !history?.length ? (
         <div className="card flex flex-col items-center gap-4 py-14 text-center">
           <BrandMark detail className="h-14 w-14 text-lo" />
-          <p className="text-[15px] text-mid">No datasets yet.</p>
-          <Link to="/" className="btn-primary btn-sm">
-            Build your first dataset <ArrowRight className="h-3.5 w-3.5" />
-          </Link>
+          <p className="text-[15px] text-mid">{t('history.noLegacy')}</p>
         </div>
       ) : (
         <ul className="space-y-3">
-          {history.map((job) => (
+          {history.map((job) => {
+            const isConversion = job.query_type === 'conversion'
+            const name = isConversion ? t('history.convertName') : job.query
+            const status = jobStatusKey[job.status]
+            return (
             <li key={job.id} className="card card-hover flex items-center justify-between gap-4 !p-5">
-              <button className="min-w-0 flex-1 space-y-2 text-left" onClick={() => handleViewJob(job)}>
+              <Link className="min-w-0 flex-1 space-y-2 text-left" to={`/history/jobs/${job.id}`}>
                 <div className="flex flex-wrap items-center gap-2.5">
                   <span className={dotClass(job.status)} />
-                  <h3 className="truncate text-[16px] font-medium">{job.query}</h3>
-                  <span className={statusClass(job.status)}>{job.status}</span>
-                  <span className="badge">{job.query_type.replace('_', ' ')}</span>
+                  <h3 className="truncate text-[16px] font-medium">{name}</h3>
+                  <span className={statusClass(job.status)}>{status ? t(status) : job.status}</span>
+                  {!isConversion && <span className="badge">{t('history.build')}</span>}
                   {job.language && job.query_type !== 'conversion' && <span className="badge">{job.language}</span>}
                 </div>
                 <div className="flex flex-wrap items-center gap-x-5 gap-y-1 pl-[17px] font-mono text-[12px] text-lo">
                   <span className="flex items-center gap-1.5">
                     <Layers className="h-3.5 w-3.5" strokeWidth={1.75} />
-                    {job.total_clips} {job.query_type === 'conversion' ? 'files' : 'clips'}
+                    {t(isConversion ? 'history.files' : 'history.clips', { count: job.total_clips })}
                   </span>
                   {job.query_type !== 'conversion' && (
                     <span className="flex items-center gap-1.5">
-                      <Clock className="h-3.5 w-3.5" strokeWidth={1.75} /> {(job.total_seconds / 60).toFixed(1)} min
+                      <Clock className="h-3.5 w-3.5" strokeWidth={1.75} /> {t('history.minutes', { duration: (job.total_seconds / 60).toFixed(1) })}
                     </span>
                   )}
                   <span className="flex items-center gap-1.5">
                     <Calendar className="h-3.5 w-3.5" strokeWidth={1.75} />
-                    {new Date(job.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
+                    {new Date(job.created_at).toLocaleDateString(locale, { month: 'short', day: 'numeric', year: 'numeric' })}
                   </span>
                 </div>
-              </button>
+              </Link>
 
               <div className="flex shrink-0 items-center gap-2">
-                <button onClick={() => handleViewJob(job)} className="icon-btn" title="Open" aria-label={`Open ${job.query}`}>
+                <Link to={`/history/jobs/${job.id}`} className="icon-btn" title={t('history.open')} aria-label={t('history.openItem', { name })}>
                   <Eye className="h-4 w-4" strokeWidth={1.75} />
-                </button>
+                </Link>
                 {job.download_url && (
-                  <a href={job.download_url} className="icon-btn" title="Download ZIP" aria-label={`Download ${job.query}`}>
+                  <a href={job.download_url} className="icon-btn" title={t('zip.download')} aria-label={t('history.downloadItem', { name })}>
                     <Download className="h-4 w-4" strokeWidth={1.75} />
                   </a>
                 )}
-                <button onClick={() => handleDelete(job.id)} className="icon-btn danger" title="Delete" aria-label={`Delete ${job.query}`}>
+                <button onClick={() => handleDelete(job.id)} className="icon-btn danger" title={t('history.delete')} aria-label={t('history.deleteItem', { name })}>
                   <Trash2 className="h-4 w-4" strokeWidth={1.75} />
                 </button>
               </div>
             </li>
-          ))}
+            )
+          })}
         </ul>
       )}
     </div>

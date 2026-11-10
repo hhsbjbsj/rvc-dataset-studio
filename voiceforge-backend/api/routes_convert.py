@@ -64,7 +64,7 @@ def convert_files(
     work_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    converted = 0
+    outputs: list[Path] = []
     errors: list[str] = []
 
     used_names: set[str] = set()
@@ -84,18 +84,16 @@ def convert_files(
                 normalize=normalize,
                 trim_silence=trim_silence,
             )
-            converted += len(results)
+            outputs.extend(results)
         except Exception as e:
             errors.append(f"{upload.filename}: {e}")
 
     # Package as ZIP
     zip_path = settings.OUTPUT_DIR / f"convert_{job_id}.zip"
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for wav in output_dir.rglob("*"):
-            rel = wav.relative_to(output_dir)
-            # Skip scratch files and extracted archive inputs (_tmp_*, _extract/, _7z_extract/)
-            if wav.is_file() and not any(part.startswith("_") for part in rel.parts):
-                zf.write(wav, rel)
+        for audio in outputs:
+            zf.write(audio, audio.relative_to(output_dir))
+    converted = len(outputs)
 
     # Save to database
     from datetime import datetime

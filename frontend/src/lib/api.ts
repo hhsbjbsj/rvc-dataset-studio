@@ -164,11 +164,10 @@ export async function cancelJob(jobId: string) {
 
 export interface Health {
   status: string
-  redis: 'connected' | 'disconnected' | string
   rvc: 'ready' | 'missing_ffmpeg'
 }
 
 export async function getHealth() {
-  const res = await api.get<Health>('/api/health', { timeout: 4000 })
+  const res = await api.get<Health>('/api/rvc/health', { timeout: 4000 })
   return res.data
 }

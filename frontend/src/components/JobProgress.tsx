@@ -1,3 +1,4 @@
+import { jobStageKey, useI18n } from '@/lib/i18n'
 import { useState } from 'react'
 import { Check, Loader2, XCircle } from 'lucide-react'
 import { useAppStore } from '@/store/appStore'
@@ -5,6 +6,7 @@ import { cancelJob } from '@/lib/api'
 import toast from 'react-hot-toast'
 
 export function JobProgress() {
+  const { t } = useI18n()
   const [cancelling, setCancelling] = useState(false)
   const { progress, currentStage, stages, uiState, currentJobId, reset } = useAppStore()
 
@@ -15,10 +17,10 @@ export function JobProgress() {
     setCancelling(true)
     try {
       await cancelJob(currentJobId)
-      toast.success('Job cancelled')
+      toast.success(t('job.cancelled'))
       reset()
     } catch {
-      toast.error('Could not cancel the job')
+      toast.error(t('job.cancelFailed'))
     } finally {
       setCancelling(false)
     }
@@ -31,8 +33,8 @@ export function JobProgress() {
           <div className="flex min-w-0 items-center gap-3">
             <Loader2 className="h-4 w-4 shrink-0 animate-spin text-accent" />
             <div className="min-w-0">
-              <span className="eyebrow block">Current stage</span>
-              <span className="block truncate text-[16px] font-medium">{currentStage || 'Waiting for the worker'}</span>
+              <span className="eyebrow block">{t('job.stage')}</span>
+              <span className="block truncate text-[16px] font-medium">{jobStageKey[currentStage] ? t(jobStageKey[currentStage]) : currentStage || t('job.waiting')}</span>
             </div>
           </div>
           <span className="font-mono text-[22px] font-medium tracking-[-0.02em]">{progress}%</span>
@@ -48,7 +50,7 @@ export function JobProgress() {
           const isActive = stage.status === 'active'
           return (
             <li
-              key={stage.name}
+              key={jobStageKey[stage.name] ? t(jobStageKey[stage.name]) : stage.name}
               className={`flex items-center gap-2.5 rounded-[12px] border px-3 py-2.5 transition-colors ${
                 isActive ? 'border-accent bg-card-active' : 'border-line'
               }`}
@@ -81,7 +83,7 @@ export function JobProgress() {
       <div className="hairline-t flex justify-end pt-5">
         <button onClick={handleCancel} disabled={cancelling} className="btn-danger btn-sm">
           {cancelling ? <Loader2 className="h-4 w-4 animate-spin" /> : <XCircle className="h-4 w-4" strokeWidth={1.75} />}
-          {cancelling ? 'Cancelling' : 'Cancel job'}
+          {cancelling ? t('job.cancelling') : t('job.cancel')}
         </button>
       </div>
     </div>

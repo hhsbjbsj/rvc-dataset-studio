@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     HOST: str = "127.0.0.1"
     PORT: int = 8001
     DEBUG: bool = False
+    RVC_SERVE_FRONTEND: bool = False
     SECRET_KEY: str = secrets.token_hex(32)
 
     # Database (relative SQLite paths are resolved against voiceforge-backend/)

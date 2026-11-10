@@ -225,6 +225,7 @@ def test_windows_mixed_media_review_and_export(client, speech, monkeypatch):
     assert client.post(base + "/export", json={"clip_ids": [clips[0]["id"], "0" * 32]}).status_code == 400
 
     batches = []
+    filenames = set()
     for clip in (clips[0], clips[-1]):
         selected_output = post(client, base + "/export", {"clip_ids": [clip["id"]], "sample_rate": 40000})
         assert selected_output["count"] == 1
@@ -233,9 +234,11 @@ def test_windows_mixed_media_review_and_export(client, speech, monkeypatch):
         with zipfile.ZipFile(io.BytesIO(download.content)) as bundle:
             metadata = json.loads(bundle.read("metadata.json"))
             assert [item["id"] for item in metadata["clips"]] == [clip["id"]]
+            assert metadata["dataset"]["scope"] == "selected"
             assert [name for name in bundle.namelist() if name.endswith(".wav")] == ["wavs/000001.wav"]
-        batches.append(download.headers["content-disposition"])
-    assert batches[0] != batches[1]
+        batches.append(selected_output)
+        filenames.add(download.headers["content-disposition"])
+    assert len(filenames) == 2
     assert client.get(base).json()["review"]["pending"]["count"] == len(clips)
     assert client.post(base + "/export", json={}).status_code == 400
 
@@ -246,6 +249,27 @@ def test_windows_mixed_media_review_and_export(client, speech, monkeypatch):
     assert client.patch(base + "/clips/review", json={"ids": [clips[-1]["id"]], "review": "excluded"}).status_code == 200
 
     output = post(client, base + "/export", {"sample_rate": 40000})
+    assert output["scope"] == "kept"
+    assert client.get(base + "/exports").json() == [output, *reversed(batches)]
+    other_project = new_project(client)
+    assert client.get(other_project + "/exports").json() == []
+    assert client.get(other_project + "/exports/" + output["export_id"]).status_code == 404
+
+    legacy_path = Path(batches[0]["directory"]).parent / "metadata.json"
+    legacy_metadata = json.loads(legacy_path.read_text(encoding="utf-8"))
+    del legacy_metadata["dataset"]["scope"]
+    legacy_path.write_text(json.dumps(legacy_metadata), encoding="utf-8")
+    del batches[0]["scope"]
+    expected_batches = [output, *reversed(batches)]
+    assert client.get(base + "/exports").json() == expected_batches
+    history = client.get("/api/rvc/exports").json()
+    history_by_project = {group["project"]["id"]: group for group in history}
+    assert other_project.rsplit("/", 1)[-1] not in history_by_project
+    project_history = history_by_project[base.rsplit("/", 1)[-1]]
+    assert project_history["project"]["character"] == "测试角色"
+    assert project_history["batches"] == expected_batches
+    assert client.get(batches[0]["download_url"]).status_code == 200
+
     wavs = Path(output["directory"])
     assert len(list(wavs.glob("*.wav"))) == len(retained) == output["count"]
     assert all(hashlib.sha256(file.read_bytes()).hexdigest() == digest for file, digest in hashes.items())
@@ -255,6 +279,48 @@ def test_windows_mixed_media_review_and_export(client, speech, monkeypatch):
         assert {"metadata.json", "sources.json", "quality_report.json"} <= set(bundle.namelist())
         with wave.open(io.BytesIO(bundle.read("wavs/000001.wav"))) as first:
             assert (first.getnchannels(), first.getsampwidth(), first.getframerate()) == (1, 2, 40000)
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg") or not shutil.which("ffprobe"), reason="Requires FFmpeg and FFprobe")
+def test_convert_mp3_archives_into_rvc_project(client, tmp_path):
+    uploads = []
+    for name, frequency, gain in (("_take", 440, 0.3), ("line", 550, 1.5)):
+        mp3 = tmp_path / (name + ".mp3")
+        ffmpeg("-f", "lavfi", "-i", f"sine=frequency={frequency}:duration=0.5", "-af", f"volume={gain}", mp3)
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as bundle:
+            bundle.write(mp3, "dataset/" + mp3.name)
+        uploads.append(("files", (name + ".zip", archive.getvalue(), "application/zip")))
+
+    response = client.post("/api/convert", files=uploads, data={"sample_rate": "22050", "normalize": "true"})
+    assert response.status_code == 200, response.text
+    converted = response.json()
+    assert converted["files_converted"] == 2 and converted["errors"] == []
+    download = client.get(converted["download_url"])
+    with zipfile.ZipFile(io.BytesIO(download.content)) as bundle:
+        assert set(bundle.namelist()) == {"_take.wav", "line.wav"}
+        for name in bundle.namelist():
+            samples, sample_rate = sf.read(io.BytesIO(bundle.read(name)))
+            assert samples.ndim == 1 and sample_rate == 22050
+            assert (samples ** 2).mean() ** 0.5 == pytest.approx(0.1, abs=0.005)
+
+    project = new_project(client)
+    other_project = new_project(client)
+    transfer = project + "/sources/converted/" + converted["job_id"]
+    assert post(client, transfer, {}) == {"queued": 2, "duplicates": 0}
+    assert post(client, transfer, {}) == {"queued": 0, "duplicates": 2}
+    assert client.get(other_project).json()["sources"] == []
+    assert client.delete("/api/jobs/" + converted["job_id"]).status_code == 200
+
+    sources = wait_for_sources(client, project)
+    assert {source["title"] for source in sources} == {"_take.wav", "line.wav"}
+    assert all(source["status"] == "done" and Path(source["origin"]).is_file() for source in sources)
+    assert all(not source["options"]["split"] and not source["options"]["normalize"] for source in sources)
+    clips = client.get(project + "/clips").json()["clips"]
+    assert len(clips) == 2 and all(clip["review"] == "pending" for clip in clips)
+    for clip in clips:
+        assert clip["duration"] == pytest.approx(0.5, abs=0.02)
+        assert client.get(project + "/clips/" + clip["id"] + "/audio").content.startswith(b"RIFF")
 
 
 def test_manual_edit_uses_the_source_timeline(client, speech, monkeypatch):

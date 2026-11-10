@@ -18,7 +18,6 @@ from schemas import (
     PaginatedClipsResponse,
     ClipResponse,
 )
-from workers.pipeline import run_pipeline
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
@@ -63,6 +62,8 @@ def create_job(request: CreateJobRequest, db: Session = Depends(get_db)):
     estimated = max(5, int(target_min * 0.4))
 
     try:
+        from workers.pipeline import run_pipeline
+
         run_pipeline.apply_async(args=[job_id], task_id=job_id, retry=False)
     except Exception as e:  # broker (Redis) not reachable
         job.status = "failed"

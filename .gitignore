@@ -53,3 +53,8 @@ downloads/
 datasets/
 out/
 output/
+
+# Native launcher build output
+/RvcLauncher.exe
+/launcher/bin/
+/launcher/obj/

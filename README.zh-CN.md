@@ -1,12 +1,16 @@
-# Beatrice RVC 数据集工作台
+# RVC Dataset Studio（RVC 数据集工作台）
 
-这个 Windows 分支在原有 WebUI 中加入 **RVC 项目**。一个项目可同时接收本地视频、本地音频和在线视频，统一进行音轨提取、语音切分、质量检查、去重和人工审核。
+这是一个在 Windows 本地运行的 RVC 训练音频准备工具。每个角色项目可接收本地视频、音频和在线视频链接，统一进行音轨提取、语音切分、质量检查、人工审核和分批导出。
 
 ## Windows 安装与启动
 
 需要 Windows 10/11、Python 3.11 或 3.12（含 `py` 启动器）、Node.js 22.12 或更高版本，以及 PATH 中的 `ffmpeg` 和 `ffprobe`。使用 `py -0p`、`node --version`、`ffmpeg -version` 和 `ffprobe -version` 检查。
 
-在项目根目录打开 PowerShell，依次运行以下命令。
+到 [GitHub 发布页](https://github.com/hhsbjbsj/rvc-dataset-studio/releases/latest) 下载 Windows x64 ZIP，解压到剩余空间充足的磁盘，从解压目录打开 `RvcLauncher.exe`。首次打开可点击「初始化环境」，然后点击「启动工作台」。启动器会打开 [本机 RVC 工作台](http://127.0.0.1:5173/rvc)。顶部可以换图或恢复默认壁纸。「背景适配」支持铺满裁剪、完整显示和拉伸填满，裁剪时可在预览里拖动图片。左侧齿轮可配置 GitHub 更新仓库和启动器语言。关闭启动器时，可确认停止它启动的服务。
+
+从源码构建启动器需要 .NET 10 SDK。在项目根目录运行 `build-launcher.ps1` 会生成 Windows x64 单文件 EXE。发布时可以传入 `-Version 0.1.0 -Repository hhsbjbsj/rvc-dataset-studio`，把版本和更新源写入 EXE。GitHub Release 标签用 `v0.1.0` 这样的正式版本号。启用自动检查后，启动器在到期时查询正式 Release，发现新版会提供发布页入口。
+
+也可以在项目根目录打开 PowerShell，依次运行以下开发命令。
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\setup-rvc.ps1
@@ -15,7 +19,7 @@ powershell -ExecutionPolicy Bypass -File .\start-rvc.ps1
 
 浏览器打开 [RVC 项目](http://127.0.0.1:5173/rvc)。在启动终端按 Ctrl+C 可停止服务。API 启动日志位于 `voiceforge-backend/tmp/run`。后端默认使用 8001 端口，可在启动前设置 `VOICEFORGE_PORT`。
 
-首次安装需联网拉取 Python 和前端包。安装完成后，本地媒体的识别、切分、审核和导出可以离线完成。RVC 项目使用 CPU、WebRTC VAD 和 SQLite 本地队列。原有 Build 页的 Redis、模型和安装步骤见 [上游说明](README.md)。
+首次安装需联网拉取 Python 和前端包。安装完成后，本地媒体的识别、切分、审核和导出可以离线完成。首页直接进入 RVC 项目，使用 CPU、WebRTC VAD 和 SQLite 本地队列。首页支持简体中文、英语和日语。角色项目的导出批次会保存在项目内和「历史记录」页。
 
 ## 创建角色项目
 
@@ -48,6 +52,21 @@ powershell -ExecutionPolicy Bypass -File .\start-rvc.ps1
 
 勾选一组片段后，点击 **导出所选片段**，即可把这组片段单独打成 ZIP。勾选跨页保留，导出不会修改审核状态。要分开导出多个角色，可以导出一组后点击 **清除选择**，再勾选下一组。**导出已保留片段** 可打包当前项目中所有标为保留的片段。
 
+要把误切成多段的一句话接回来，勾选相关片段再合并。原片段移入合并缓冲区，确认不需要后可以逐个删除或一键清空。打开合并结果的波形编辑器，可在同一条波形上建立多个选区，分别拖动边界和试听。保存时每个选区会成为一条独立片段，试听速度不会写入输出。
+
+波形编辑器获得焦点时，可用键盘操作：
+
+| 按键 | 操作 |
+| --- | --- |
+| ↑ / ↓ | 切换选区。循环播放时从新选区开头继续；暂停时只切换。 |
+| ← / → | 移动起点，每次 0.01 秒。按住 Shift 则移动终点。 |
+| 空格 | 从当前选区开始循环，或暂停、从暂停处继续。试听支持 1、0.75、0.5、0.25 倍速。 |
+| Delete（含小键盘 Del） | 移除当前选区，循环中自动接播下一段。 |
+| Ctrl+Z / Ctrl+Y | 撤销或重做选区的移除。 |
+| Ctrl+S | 一次保存所有剩余选区。 |
+
+每次 ZIP 导出都会留下独立记录。重开软件后，在项目的「导出历史」或顶部「历史记录」页可以重新下载。已有 MP3 等音频也可以先在「音频转换」页统一格式和音量，再把转换结果直接导入现有或新建的角色项目。
+
 导出支持 16、22.05、24、32、40、44.1 和 48 kHz。导出目录和 ZIP 都含有 `wavs`，其中每个文件为单声道、16-bit PCM WAV。将 `wavs` 的路径交给 RVC 的预处理步骤。三个 JSON 文件分别记录数据集和片段、素材来源及质量检查结果。
 
 ## 磁盘位置
@@ -69,8 +88,6 @@ powershell -ExecutionPolicy Bypass -File .\start-rvc.ps1
 
 媒体测试在 Windows 用系统语音合成器生成样本，验证多音轨 MP4、MKV、中文路径、MP3/WAV/FLAC、原文件哈希、混合来源、音频试听、审核和 40 kHz 导出。测试中的 B 站搜索和下载有模拟数据，以便离线复现。
 
-本机验收通过 20 项自动化测试，TypeScript 和 Vite 构建通过。Windows 启动脚本已拉起 API 和 WebUI。另行实测 B 站搜索返回 20 条候选，下载一条短视频后切出 3 段，并保留其中 1 段导出为 40 kHz WAV。
+当前重复检测基于标准化解码后的 PCM 哈希。重新编码或边界改变后的相似语音仍需要人工审核。说话者由用户试听确认。当前版本不做声纹匹配、背景音乐或音效分离，也不训练 RVC 模型。
 
-当前重复检测基于标准化解码后的 PCM 哈希。重新编码或边界改变后的相似语音仍需要人工审核。RVC 项目当前由用户确认说话者，参考声纹匹配、人声分离、波形编辑和合集展开属于后续功能。旧版 Build 页保留其原有的自动模型流程。
-
-本项目沿用 [MIT 许可证](LICENSE) 和上游版权声明。
+本项目基于 [Beatrice Dataset WebUI for Windows](https://github.com/Project-Beatrice-V2/Beatrice-dataset-webui-windows)，沿用 [MIT 许可证](LICENSE) 并保留上游版权声明。

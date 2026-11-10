@@ -4,9 +4,11 @@ import asyncio
 import logging
 import shutil
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from config import get_settings
@@ -71,6 +73,22 @@ app.include_router(rvc_router)
 settings.ensure_dirs()
 app.mount("/static/outputs", StaticFiles(directory=str(settings.OUTPUT_DIR)), name="outputs")
 
+if settings.RVC_SERVE_FRONTEND:
+    frontend = Path(__file__).resolve().parents[1] / "frontend" / "dist"
+    if not (frontend / "index.html").is_file():
+        raise RuntimeError("The launcher needs frontend/dist. Run setup-rvc.ps1 to build it.")
+    app.mount("/assets", StaticFiles(directory=frontend / "assets"), name="frontend-assets")
+
+    @app.get("/favicon.svg", include_in_schema=False)
+    def frontend_icon():
+        return FileResponse(frontend / "favicon.svg")
+
+    def frontend_index():
+        return FileResponse(frontend / "index.html", headers={"Cache-Control": "no-cache"})
+
+    for path in ("/", "/rvc", "/convert", "/history", "/history/jobs/{job_id}"):
+        app.add_api_route(path, frontend_index, include_in_schema=False)
+
 
 @app.get("/health")
 def health_check():
@@ -79,10 +97,12 @@ def health_check():
 
 @app.get("/api/health")
 def api_health():
-    return {
-        "status": "ok", "redis": _check_redis(),
-        "rvc": "ready" if shutil.which("ffmpeg") and shutil.which("ffprobe") else "missing_ffmpeg",
-    }
+    return {**rvc_health(), "redis": _check_redis()}
+
+
+@app.get("/api/rvc/health")
+def rvc_health():
+    return {"status": "ok", "rvc": "ready" if shutil.which("ffmpeg") and shutil.which("ffprobe") else "missing_ffmpeg"}
 
 
 def _check_redis() -> str:
