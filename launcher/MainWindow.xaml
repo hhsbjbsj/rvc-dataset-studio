@@ -4,6 +4,7 @@
         xmlns:local="clr-namespace:RvcLauncher"
         xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
         Title="RVC Dataset Studio" Width="1120" Height="690" MinWidth="850" MinHeight="560"
+        Icon="Assets/RvcLauncher.ico"
         WindowStartupLocation="CenterScreen" WindowStyle="None" ResizeMode="CanResize"
         Background="#111627" Foreground="#F2F5FF" FontFamily="Segoe UI, Microsoft YaHei UI, Yu Gothic UI"
         UseLayoutRounding="True">
