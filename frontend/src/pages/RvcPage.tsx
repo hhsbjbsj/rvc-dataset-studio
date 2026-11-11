@@ -68,6 +68,13 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
   const [trimResults, setTrimResults] = useState<Clip[]>([])
   const trimPanel = useRef<HTMLDivElement>(null)
   const [bufferOpen, setBufferOpen] = useState(false)
+  const exportPreference = 'rvc:export-history:' + id
+  const [exportsExpanded, setExportsExpanded] = useState(() => {
+    try { return localStorage.getItem(exportPreference) !== 'collapsed' } catch { return true }
+  })
+  useEffect(() => {
+    try { localStorage.setItem(exportPreference, exportsExpanded ? 'expanded' : 'collapsed') } catch { /* Storage is optional. */ }
+  }, [exportPreference, exportsExpanded])
   const [bufferDeletion, setBufferDeletion] = useState<string | string[]>()
   const clearBufferIds = Array.isArray(bufferDeletion) ? bufferDeletion : undefined
   const details = useQuery({
@@ -400,11 +407,19 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
           </div>
         )}
         <section className="hairline-b space-y-2 pb-4" aria-label={t('rvc.exports')}>
-          <h3 className="text-sm font-semibold text-hi">{t('rvc.exports')}</h3>
-          {exportHistory.isPending && <p className="text-sm text-lo">{t('rvc.loadingExports')}</p>}
-          {exportHistory.isError && <p role="alert" className="text-sm text-lo">{t('rvc.exportsFailed')}{' ' + diagnostic(message(exportHistory.error))}</p>}
-          {exportHistory.isSuccess && !batches.length && <p className="text-sm text-lo">{t('rvc.noExports')}</p>}
-          {!!batches.length && <RvcExportList batches={batches} />}
+          <div className="flex items-center justify-between gap-3">
+            <h3 className="text-sm font-semibold text-hi">{t('rvc.exports')}{exportHistory.isSuccess && ` (${batches.length})`}</h3>
+            <button type="button" className="btn btn-secondary btn-sm" aria-expanded={exportsExpanded}
+              aria-controls="project-export-history" onClick={() => setExportsExpanded(open => !open)}>
+              {t(exportsExpanded ? 'rvc.collapseExports' : 'rvc.expandExports')}
+            </button>
+          </div>
+          <div id="project-export-history" hidden={!exportsExpanded} className="space-y-2">
+            {exportHistory.isPending && <p className="text-sm text-lo">{t('rvc.loadingExports')}</p>}
+            {exportHistory.isError && <p role="alert" className="text-sm text-lo">{t('rvc.exportsFailed')}{' ' + diagnostic(message(exportHistory.error))}</p>}
+            {exportHistory.isSuccess && !batches.length && <p className="text-sm text-lo">{t('rvc.noExports')}</p>}
+            {!!batches.length && <RvcExportList batches={batches} />}
+          </div>
         </section>
         <ul className="space-y-3">
           {clipPage.data?.clips.map(clip => (

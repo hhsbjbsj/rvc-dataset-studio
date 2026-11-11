@@ -124,6 +124,14 @@ class SearchCache(Base):
     expires_at = Column(DateTime, nullable=True)
 
 
+class RemovedHistoryEntry(Base):
+    __tablename__ = "removed_history_entries"
+
+    kind = Column(String, primary_key=True)
+    project_id = Column(String, primary_key=True)
+    item_id = Column(String, primary_key=True)
+
+
 # SQLite needs check_same_thread=False for async usage
 connect_args = {}
 if settings.DATABASE_URL.startswith("sqlite"):

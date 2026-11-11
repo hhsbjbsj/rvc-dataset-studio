@@ -1,9 +1,10 @@
 """Job history endpoints."""
 
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from database import Job, get_db
+from database import Job, RemovedHistoryEntry, get_db
 from schemas import HistoryItem
 
 router = APIRouter(prefix="/api/history", tags=["history"])
@@ -17,6 +18,7 @@ def get_history(
 ):
     jobs = (
         db.query(Job)
+        .filter(Job.id.not_in(select(RemovedHistoryEntry.item_id).where(RemovedHistoryEntry.kind == "job")))
         .order_by(Job.created_at.desc())
         .offset(offset)
         .limit(limit)

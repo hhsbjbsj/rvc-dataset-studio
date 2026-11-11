@@ -1,5 +1,6 @@
 import { jobStatusKey, useI18n } from '@/lib/i18n'
-import { useQuery } from '@tanstack/react-query'
+import { useState } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { Download, RefreshCw, Trash2, Clock, Layers, Eye, Calendar, Loader2 } from 'lucide-react'
 import toast from 'react-hot-toast'
@@ -10,8 +11,11 @@ import type { Project } from '@/components/RvcSources'
 import type { ExportBatch } from '@/lib/rvc'
 
 type RvcExportGroup = { project: Project; batches: ExportBatch[] }
+type HistorySelection = { exports: { project_id: string; export_id: string }[]; job_ids: string[] }
 
 const ACTIVE = ['queued', 'searching', 'downloading', 'processing', 'packaging']
+const FINISHED = new Set(['done', 'failed', 'cancelled', 'canceled'])
+const exportKey = (projectId: string, exportId: string) => `export:${projectId}:${exportId}`
 
 function statusClass(status: string) {
   if (status === 'done') return 'badge badge-ok'
@@ -29,6 +33,8 @@ function dotClass(status: string) {
 
 export function HistoryPage() {
   const { t, locale } = useI18n()
+  const queryClient = useQueryClient()
+  const [selected, setSelected] = useState<Set<string>>(() => new Set())
   const { data: history, refetch, isLoading, isError, isFetching } = useQuery({
     queryKey: ['history'],
     queryFn: getHistory,
@@ -38,6 +44,36 @@ export function HistoryPage() {
     queryKey: ['rvc-exports'],
     queryFn: async () => (await api.get<RvcExportGroup[]>('/api/rvc/exports')).data,
   })
+  const selection: HistorySelection = {
+    exports: (rvcHistory.data ?? []).flatMap(({ project, batches }) => batches
+      .filter(batch => selected.has(exportKey(project.id, batch.export_id)))
+      .map(batch => ({ project_id: project.id, export_id: batch.export_id }))),
+    job_ids: (history ?? []).filter(job => FINISHED.has(job.status) && selected.has(`job:${job.id}`)).map(job => job.id),
+  }
+  const selectedCount = selection.exports.length + selection.job_ids.length
+  const remove = useMutation({
+    mutationFn: async (items: HistorySelection) => (await api.post<{ removed: number }>('/api/rvc/history/remove', items)).data,
+    onSuccess: async ({ removed }) => {
+      setSelected(new Set())
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['rvc-exports'] }),
+        queryClient.invalidateQueries({ queryKey: ['history'] }),
+      ])
+      toast.success(t('history.recordsRemoved', { count: removed }))
+    },
+    onError: () => toast.error(t('history.removeFailed')),
+  })
+
+  const toggle = (key: string, checked: boolean) => setSelected(current => {
+    const next = new Set(current)
+    if (checked) next.add(key)
+    else next.delete(key)
+    return next
+  })
+
+  const removeSelected = () => {
+    if (selectedCount && window.confirm(t('history.removeConfirm', { count: selectedCount }))) remove.mutate(selection)
+  }
 
   const handleDelete = async (id: string) => {
     if (!window.confirm(t('history.confirm'))) return
@@ -66,6 +102,17 @@ export function HistoryPage() {
         </button>
       </div>
 
+      {!!(rvcHistory.data?.length || history?.some(job => FINISHED.has(job.status))) && (
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="text-sm text-mid" aria-live="polite">{t('history.recordsSelected', { count: selectedCount })}</span>
+          <button type="button" className="btn btn-secondary btn-sm" disabled={!selectedCount || remove.isPending}
+            onClick={() => setSelected(new Set())}>{t('rvc.clearSelection')}</button>
+          <button type="button" className="btn btn-danger btn-sm" disabled={!selectedCount || remove.isPending} onClick={removeSelected}>
+            <Trash2 className="h-3.5 w-3.5" strokeWidth={1.75} /> {t('history.removeSelected')}
+          </button>
+        </div>
+      )}
+
       <section className="space-y-3" aria-labelledby="rvc-history-title">
         <h2 className="text-lg font-semibold text-hi" id="rvc-history-title">{t('history.rvc')}</h2>
         {rvcHistory.isPending && <p className="text-sm text-lo">{t('history.rvcLoading')}</p>}
@@ -75,7 +122,11 @@ export function HistoryPage() {
           <article className="card space-y-3 !p-5" key={project.id}>
             <h3 className="break-all text-base font-medium text-hi">{project.character}</h3>
             <p className="break-all text-xs text-lo">{project.series} · {project.language}</p>
-            <RvcExportList batches={batches} />
+            <RvcExportList batches={batches} selection={{
+              isSelected: id => selected.has(exportKey(project.id, id)),
+              toggle: (id, checked) => toggle(exportKey(project.id, id), checked),
+              disabled: remove.isPending,
+            }} />
           </article>
         ))}
       </section>
@@ -103,6 +154,11 @@ export function HistoryPage() {
             const status = jobStatusKey[job.status]
             return (
             <li key={job.id} className="card card-hover flex items-center justify-between gap-4 !p-5">
+              {FINISHED.has(job.status) && (
+                <input type="checkbox" aria-label={t('history.selectItem', { name })}
+                  checked={selected.has(`job:${job.id}`)} disabled={remove.isPending}
+                  onChange={event => toggle(`job:${job.id}`, event.target.checked)} />
+              )}
               <Link className="min-w-0 flex-1 space-y-2 text-left" to={`/history/jobs/${job.id}`}>
                 <div className="flex flex-wrap items-center gap-2.5">
                   <span className={dotClass(job.status)} />
@@ -137,7 +193,8 @@ export function HistoryPage() {
                     <Download className="h-4 w-4" strokeWidth={1.75} />
                   </a>
                 )}
-                <button onClick={() => handleDelete(job.id)} className="icon-btn danger" title={t('history.delete')} aria-label={t('history.deleteItem', { name })}>
+                <button onClick={() => handleDelete(job.id)} disabled={remove.isPending}
+                  className="icon-btn danger" title={t('history.deleteFiles')} aria-label={t('history.deleteItem', { name })}>
                   <Trash2 className="h-4 w-4" strokeWidth={1.75} />
                 </button>
               </div>

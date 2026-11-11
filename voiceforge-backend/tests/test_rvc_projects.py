@@ -16,10 +16,10 @@ import pytest
 import soundfile as sf
 from fastapi.testclient import TestClient
 
-from database import SessionLocal
+from database import Job, SessionLocal
 from main import app
 from processing.rvc_audio import MediaError, write_clip
-from rvc_projects import RvcClip, clip_path, work_dir
+from rvc_projects import RvcClip, clip_path, export_root, new_id, work_dir
 from sources.rvc_online import normalize_url
 
 VIDEO = "https://www.bilibili.com/video/BV1n44y1Q7sc"
@@ -250,7 +250,9 @@ def test_windows_mixed_media_review_and_export(client, speech, monkeypatch):
 
     output = post(client, base + "/export", {"sample_rate": 40000})
     assert output["scope"] == "kept"
-    assert client.get(base + "/exports").json() == [output, *reversed(batches)]
+    assert client.get(base + "/exports").json() == [
+        {**batch, "batch_number": number} for number, batch in zip((3, 2, 1), (output, *reversed(batches)))
+    ]
     other_project = new_project(client)
     assert client.get(other_project + "/exports").json() == []
     assert client.get(other_project + "/exports/" + output["export_id"]).status_code == 404
@@ -260,7 +262,9 @@ def test_windows_mixed_media_review_and_export(client, speech, monkeypatch):
     del legacy_metadata["dataset"]["scope"]
     legacy_path.write_text(json.dumps(legacy_metadata), encoding="utf-8")
     del batches[0]["scope"]
-    expected_batches = [output, *reversed(batches)]
+    expected_batches = [
+        {**batch, "batch_number": number} for number, batch in zip((3, 2, 1), (output, *reversed(batches)))
+    ]
     assert client.get(base + "/exports").json() == expected_batches
     history = client.get("/api/rvc/exports").json()
     history_by_project = {group["project"]["id"]: group for group in history}
@@ -279,6 +283,44 @@ def test_windows_mixed_media_review_and_export(client, speech, monkeypatch):
         assert {"metadata.json", "sources.json", "quality_report.json"} <= set(bundle.namelist())
         with wave.open(io.BytesIO(bundle.read("wavs/000001.wav"))) as first:
             assert (first.getnchannels(), first.getsampwidth(), first.getframerate()) == (1, 2, 40000)
+
+
+def test_remove_selected_history_preserves_files_and_batch_numbers(client):
+    base = new_project(client)
+    project_id = base.rsplit("/", 1)[-1]
+    export_ids = [new_id() for _ in range(3)]
+    for index, export_id in enumerate(export_ids, 1):
+        destination = export_root(project_id) / export_id
+        (destination / "wavs").mkdir(parents=True)
+        (destination / "wavs" / "sample.wav").write_bytes(b"audio")
+        with zipfile.ZipFile(destination / "dataset.zip", "w") as archive:
+            archive.write(destination / "wavs" / "sample.wav", "wavs/sample.wav")
+        (destination / "metadata.json").write_text(json.dumps({"dataset": {
+            "created_at": f"2026-01-0{index}T00:00:00+00:00", "count": 1, "duration_seconds": 1, "sample_rate": 40000,
+        }}), encoding="utf-8")
+
+    removed_job, kept_job, active_job = [new_id() for _ in range(3)]
+    with SessionLocal.begin() as db:
+        db.add_all([Job(id=job_id, query="Test conversion", query_type="conversion", status=status)
+                    for job_id, status in ((removed_job, "done"), (kept_job, "done"), (active_job, "processing"))])
+    remove_url = "/api/rvc/history/remove"
+    oldest = export_root(project_id) / export_ids[0]
+    download_url = base + "/exports/" + export_ids[0]
+    original_zip = client.get(download_url).content
+    selection = {"exports": [{"project_id": project_id, "export_id": export_ids[0]}], "job_ids": [removed_job]}
+    assert client.post(remove_url, json={**selection, "job_ids": [active_job]}).status_code == 409
+    assert len(client.get(base + "/exports").json()) == 3
+    assert post(client, remove_url, selection) == {"removed": 2}
+    assert post(client, remove_url, selection) == {"removed": 2}
+    remaining = client.get(base + "/exports").json()
+    assert [(row["export_id"], row["batch_number"]) for row in remaining] == [(export_ids[2], 3), (export_ids[1], 2)]
+    global_history = client.get("/api/rvc/exports").json()
+    assert next(group for group in global_history if group["project"]["id"] == project_id)["batches"] == remaining
+    assert client.get(download_url).content == original_zip
+    assert (oldest / "wavs" / "sample.wav").read_bytes() == b"audio"
+    visible_jobs = {job["id"] for job in client.get("/api/history").json()}
+    assert removed_job not in visible_jobs and {kept_job, active_job} <= visible_jobs
+    assert client.get(f"/api/jobs/{removed_job}").status_code == 200
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg") or not shutil.which("ffprobe"), reason="Requires FFmpeg and FFprobe")

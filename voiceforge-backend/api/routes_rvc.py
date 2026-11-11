@@ -2,6 +2,7 @@
 
 import os
 import stat
+from collections import defaultdict
 from pathlib import Path
 from threading import Lock
 from typing import Annotated, Literal
@@ -16,7 +17,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from database import Job, get_db
+from database import Job, RemovedHistoryEntry, get_db
 from processing.rvc_audio import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS, MediaError, probe
 from processing.rvc_edit import (
     create_edit, create_edits, delete_buffered_clips, restore_buffer_audio, source_audio_info, source_audio_path, waveform_peaks,
@@ -40,6 +41,8 @@ picker_lock = Lock()
 conversion_import_lock = Lock()
 # Exports must finish reading selected WAVs before a merge removes them.
 clip_file_lock = Lock()
+history_removal_lock = Lock()
+FINISHED_JOBS = {"done", "failed", "cancelled", "canceled"}
 
 
 def require_local(request: Request) -> None:
@@ -57,6 +60,16 @@ class ProjectInput(BaseModel):
     character: Name
     language: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=40)]
     target_minutes: float = Field(20, gt=0, le=1440)
+
+
+class ExportHistoryEntry(BaseModel):
+    project_id: Identifier
+    export_id: Identifier
+
+
+class HistoryRemoval(BaseModel):
+    exports: list[ExportHistoryEntry] = Field(default_factory=list)
+    job_ids: list[Annotated[str, StringConstraints(min_length=1, max_length=100)]] = Field(default_factory=list, max_length=200)
 
 
 class LocalImport(BaseModel):
@@ -603,10 +616,15 @@ def export_project(project_id: Identifier, data: ExportInput, db: DB):
 @router.get("/exports")
 def rvc_export_history(db: DB):
     projects = [project_data(row) for row in db.scalars(select(RvcProject))]
+    removed_by_project = defaultdict(set)
+    for project_id, export_id in db.execute(
+        select(RemovedHistoryEntry.project_id, RemovedHistoryEntry.item_id).where(RemovedHistoryEntry.kind == "export")
+    ):
+        removed_by_project[project_id].add(export_id)
     db.close()
     history = []
     for project in projects:
-        batches = list_exports(project["id"])
+        batches = list_exports(project["id"], removed_by_project[project["id"]])
         if batches:
             history.append({"project": project, "batches": batches})
     return sorted(history, key=lambda entry: entry["batches"][0]["created_at"], reverse=True)
@@ -615,7 +633,28 @@ def rvc_export_history(db: DB):
 @router.get("/projects/{project_id}/exports")
 def export_history(project_id: Identifier, db: DB):
     get_project(db, project_id)
-    return list_exports(project_id)
+    removed_ids = set(db.scalars(select(RemovedHistoryEntry.item_id).where(
+        RemovedHistoryEntry.kind == "export", RemovedHistoryEntry.project_id == project_id,
+    )))
+    return list_exports(project_id, removed_ids)
+
+
+@router.post("/history/remove")
+def remove_history(data: HistoryRemoval, db: DB):
+    exports = {(entry.project_id, entry.export_id) for entry in data.exports}
+    with history_removal_lock:
+        jobs = db.execute(select(Job.id, Job.status).where(Job.id.in_(set(data.job_ids)))).all() if data.job_ids else []
+        if any(status not in FINISHED_JOBS for _, status in jobs):
+            raise HTTPException(409, "运行中的任务不能从历史记录中移除。")
+        for project_id, export_id in exports:
+            if not (export_root(project_id) / export_id / "dataset.zip").is_file():
+                raise HTTPException(404, "部分所选导出已不存在，请刷新历史记录。")
+        for project_id, export_id in exports:
+            db.merge(RemovedHistoryEntry(kind="export", project_id=project_id, item_id=export_id))
+        for job_id, _ in jobs:
+            db.merge(RemovedHistoryEntry(kind="job", project_id="", item_id=job_id))
+        db.commit()
+    return {"removed": len(exports) + len(jobs)}
 
 
 @router.get("/projects/{project_id}/exports/{export_id}")

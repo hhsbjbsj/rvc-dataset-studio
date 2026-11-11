@@ -6,6 +6,7 @@ import re
 import shutil
 import tempfile
 import zipfile
+from collections.abc import Collection
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
@@ -25,7 +26,7 @@ def _export_result(destination: Path, summary: dict) -> dict:
     }
 
 
-def list_exports(project_id: str) -> list[dict]:
+def list_exports(project_id: str, removed_ids: Collection[str] = ()) -> list[dict]:
     batches = []
     for archive in export_root(project_id).glob("*/dataset.zip"):
         destination = archive.parent
@@ -39,7 +40,11 @@ def list_exports(project_id: str) -> list[dict]:
         except (OSError, ValueError, KeyError, TypeError):
             continue
         batches.append(_export_result(destination, summary))
-    return sorted(batches, key=lambda batch: (batch["created_at"], batch["export_id"]), reverse=True)
+    batches.sort(key=lambda batch: (batch["created_at"], batch["export_id"]), reverse=True)
+    return [
+        {**batch, "batch_number": len(batches) - index}
+        for index, batch in enumerate(batches) if batch["export_id"] not in removed_ids
+    ]
 
 
 def export_dataset(

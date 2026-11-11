@@ -1,6 +1,6 @@
 export type ExportBatch = {
   export_id: string; directory: string; count: number; duration_seconds: number; download_url: string
-  created_at: string; sample_rate: number; scope?: 'selected' | 'kept'
+  created_at: string; sample_rate: number; scope?: 'selected' | 'kept'; batch_number?: number
 }
 
 export function timestamp(seconds: number) {
