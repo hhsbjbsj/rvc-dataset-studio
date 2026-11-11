@@ -18,6 +18,8 @@ from sqlalchemy import (
     Text,
     create_engine,
     event,
+    inspect,
+    select,
 )
 from sqlalchemy.orm import DeclarativeBase, Session, relationship, sessionmaker
 
@@ -142,7 +144,24 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
 def init_db() -> None:
-    Base.metadata.create_all(bind=engine)
+    with engine.begin() as connection:
+        Base.metadata.create_all(bind=connection)
+        bundles = Base.metadata.tables.get("rvc_bundle_selections")
+        if bundles is not None and "deselect_after_download" not in {
+            column["name"] for column in inspect(connection).get_columns(bundles.name)
+        }:
+            # Before download badges, bundle records were only created for opt-in deselection.
+            downloads = Base.metadata.tables["rvc_export_downloads"]
+            saved = set(connection.execute(select(downloads.c.project_id, downloads.c.export_id)).tuples())
+            completed = connection.scalars(select(bundles.c.exports).where(bundles.c.status == "completed"))
+            restored = {(entry["project_id"], entry["export_id"]) for bundle in completed for entry in bundle} - saved
+            if restored:
+                connection.execute(downloads.insert(), [
+                    {"project_id": project_id, "export_id": export_id} for project_id, export_id in restored
+                ])
+            connection.exec_driver_sql(
+                "ALTER TABLE rvc_bundle_selections ADD COLUMN deselect_after_download BOOLEAN NOT NULL DEFAULT TRUE"
+            )
     
     # Mark any jobs left in active/non-terminal states as failed since the backend restarted
     db = SessionLocal()

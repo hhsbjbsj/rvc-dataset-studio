@@ -34,8 +34,8 @@ from processing.rvc_export import (
 )
 from processing.rvc_import import stage_conversion
 from rvc_projects import (
-    RvcBundleSelection, RvcClip, RvcExportSelection, RvcMergeBuffer, RvcProject, RvcSource, RvcWorkspace, active_clip,
-    clip_data, clip_path, new_id, project_data, source_data, work_dir,
+    RvcBundleSelection, RvcClip, RvcExportDownload, RvcExportSelection, RvcMergeBuffer, RvcProject, RvcSource, RvcWorkspace,
+    active_clip, clip_data, clip_path, new_id, project_data, source_data, work_dir,
 )
 from sources.rvc_online import resolve_source_url, search_bilibili_page
 from workers.rvc_worker import update_source
@@ -674,11 +674,15 @@ def rvc_export_history(db: DB):
         select(RemovedHistoryEntry.project_id, RemovedHistoryEntry.item_id).where(RemovedHistoryEntry.kind == "export")
     ):
         removed_by_project[project_id].add(export_id)
+    downloaded_by_project = defaultdict(set)
+    for project_id, export_id in db.execute(select(RvcExportDownload.project_id, RvcExportDownload.export_id)):
+        downloaded_by_project[project_id].add(export_id)
     db.close()
     history = []
     with export_history_lock:
         for project in projects:
-            batches = list_exports(project["id"], removed_by_project[project["id"]])
+            project_id = project["id"]
+            batches = list_exports(project_id, removed_by_project[project_id], downloaded_by_project[project_id])
             if batches:
                 history.append({"project": project, "batches": batches})
     return sorted(history, key=lambda entry: entry["batches"][0]["created_at"], reverse=True)
@@ -690,8 +694,9 @@ def export_history(project_id: Identifier, db: DB):
     removed_ids = set(db.scalars(select(RemovedHistoryEntry.item_id).where(
         RemovedHistoryEntry.kind == "export", RemovedHistoryEntry.project_id == project_id,
     )))
+    downloaded_ids = set(db.scalars(select(RvcExportDownload.export_id).where(RvcExportDownload.project_id == project_id)))
     with export_history_lock:
-        return list_exports(project_id, removed_ids)
+        return list_exports(project_id, removed_ids, downloaded_ids)
 
 
 @router.get("/exports/selection")
@@ -759,19 +764,19 @@ def create_export_bundle(data: ExportBundleInput, db: DB):
     except OSError as exc:
         raise HTTPException(409, "无法打包所选批次，请检查导出 ZIP 和工作盘。") from exc
     download_url = f"/api/rvc/exports/bundles/{bundle.stem}"
-    if data.deselect_after_download:
-        try:
-            cutoff = datetime.now(timezone.utc) - BUNDLE_SELECTION_TTL
-            db.execute(delete(RvcBundleSelection).where(RvcBundleSelection.created_at < cutoff))
-            db.add(RvcBundleSelection(bundle_id=bundle.stem, exports=[
-                {"project_id": project_id, "export_id": export_id} for project_id, export_id in requested
-            ]))
-            db.commit()
-        except SQLAlchemyError as exc:
-            discard_export_bundle(bundle)
-            raise HTTPException(500, "无法保存导出批次的勾选。") from exc
-        return {"download_url": download_url, "status_url": f"{download_url}/status"}
-    return {"download_url": download_url}
+    try:
+        cutoff = datetime.now(timezone.utc) - BUNDLE_SELECTION_TTL
+        db.execute(delete(RvcBundleSelection).where(RvcBundleSelection.created_at < cutoff))
+        db.add(RvcBundleSelection(
+            bundle_id=bundle.stem,
+            exports=[{"project_id": project_id, "export_id": export_id} for project_id, export_id in requested],
+            deselect_after_download=data.deselect_after_download,
+        ))
+        db.commit()
+    except SQLAlchemyError as exc:
+        discard_export_bundle(bundle)
+        raise HTTPException(500, "无法保存打包下载记录。") from exc
+    return {"download_url": download_url, "status_url": f"{download_url}/status"}
 
 
 def finish_bundle_download(bundle_id: str, delivered: bool) -> None:
@@ -781,9 +786,13 @@ def finish_bundle_download(bundle_id: str, delivered: bool) -> None:
             return
         if delivered:
             for entry in bundle.exports:
-                selected = db.get(RvcExportSelection, (entry["project_id"], entry["export_id"]))
-                if selected is not None:
-                    db.delete(selected)
+                key = (entry["project_id"], entry["export_id"])
+                if db.get(RvcExportDownload, key) is None:
+                    db.add(RvcExportDownload(project_id=key[0], export_id=key[1]))
+                if bundle.deselect_after_download:
+                    selected = db.get(RvcExportSelection, key)
+                    if selected is not None:
+                        db.delete(selected)
         bundle.status = "completed" if delivered else "interrupted"
     if delivered:
         discard_export_bundle(export_bundle_path(bundle_id))

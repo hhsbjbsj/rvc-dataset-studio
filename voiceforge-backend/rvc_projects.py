@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, select
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, select, true
 from sqlalchemy.orm import Mapped, mapped_column
 
 from config import get_settings, rvc_export_root
@@ -44,6 +44,13 @@ class RvcExportSelection(Base):
     export_id: Mapped[str] = mapped_column(String(32), primary_key=True)
 
 
+class RvcExportDownload(Base):
+    __tablename__ = "rvc_export_downloads"
+
+    project_id: Mapped[str] = mapped_column(ForeignKey("rvc_projects.id"), primary_key=True)
+    export_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+
+
 class RvcBundleSelection(Base):
     __tablename__ = "rvc_bundle_selections"
 
@@ -51,6 +58,7 @@ class RvcBundleSelection(Base):
     exports: Mapped[list[dict[str, str]]] = mapped_column(JSON)
     status: Mapped[str] = mapped_column(String(20), default="pending")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    deselect_after_download: Mapped[bool] = mapped_column(server_default=true())
 
 
 class RvcSource(Base):

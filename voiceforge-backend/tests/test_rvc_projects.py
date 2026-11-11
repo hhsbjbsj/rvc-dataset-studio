@@ -424,12 +424,24 @@ def test_download_selected_export_batches_as_one_zip(client):
             folders.append(folder)
 
     url = "/api/rvc/exports/bundles"
+
+    def downloaded_exports():
+        return {
+            (group["project"]["id"], batch["export_id"])
+            for group in client.get("/api/rvc/exports").json()
+            for batch in group["batches"] if batch.get("downloaded")
+        }
+
+    first_download = {(selected[index]["project_id"], selected[index]["export_id"]) for index in (0, 2)}
     assert client.post(url, json={"exports": []}).status_code == 422
     assert client.post(url, json={"exports": [{**selected[0], "export_id": new_id()}]}).status_code == 404
     response = client.post(url, json={"exports": [selected[0], selected[2], selected[0]]})
     assert response.status_code == 201, response.text
     download_url = response.json()["download_url"]
+    status_url = response.json()["status_url"]
     assert export_bundle_path(download_url.rsplit("/", 1)[-1]).is_file()
+    assert client.get(status_url).json() == {"status": "pending"}
+    assert downloaded_exports().isdisjoint(first_download)
     response = client.get(download_url)
     assert response.status_code == 200
     assert unquote(response.headers["content-disposition"]).endswith("RVC-导出批次.zip")
@@ -441,6 +453,12 @@ def test_download_selected_export_batches_as_one_zip(client):
         assert bundle.read("第001批 - 角色甲/wavs/sample.wav") == b"project-0-batch-1"
         assert bundle.read("第001批 - 角色甲 (2)/wavs/sample.wav") == b"project-1-batch-1"
         assert bundle.testzip() is None
+    assert client.get(status_url).json() == {"status": "completed"}
+    assert first_download <= downloaded_exports()
+    project_history_url = f"/api/rvc/projects/{selected[0]['project_id']}/exports"
+    assert [(batch["export_id"], batch.get("downloaded", False)) for batch in client.get(project_history_url).json()] == [
+        (selected[1]["export_id"], False), (selected[0]["export_id"], True),
+    ]
     assert client.get(download_url).status_code == 404
     assert all((folder / "dataset.zip").is_file() for folder in folders)
 
@@ -454,12 +472,14 @@ def test_download_selected_export_batches_as_one_zip(client):
     plain = post(client, url, {"exports": [selected[0]]})
     assert client.get(plain["download_url"]).status_code == 200
     assert len(saved_selection()) == 3
-    opted_in = post(client, url, {"exports": [selected[0], selected[2]], "deselect_after_download": True})
+    second_download = (selected[1]["project_id"], selected[1]["export_id"])
+    opted_in = post(client, url, {"exports": selected[:2], "deselect_after_download": True})
     assert client.get(opted_in["status_url"]).json() == {"status": "pending"}
     partial = client.get(opted_in["download_url"], headers={"Range": "bytes=0-7"})
     assert partial.status_code == 206
     assert client.get(opted_in["status_url"]).json() == {"status": "pending"}
     assert len(saved_selection()) == 3
+    assert second_download not in downloaded_exports()
 
     async def interrupt_download():
         from api.routes_rvc import TrackedBundleDownload
@@ -483,10 +503,17 @@ def test_download_selected_export_batches_as_one_zip(client):
     asyncio.run(interrupt_download())
     assert client.get(opted_in["status_url"]).json() == {"status": "interrupted"}
     assert len(saved_selection()) == 3
+    assert second_download not in downloaded_exports()
     download = client.get(opted_in["download_url"])
     assert download.status_code == 200
     assert client.get(opted_in["status_url"]).json() == {"status": "completed"}
-    assert saved_selection() == [selected[1]]
+    assert saved_selection() == [selected[2]]
+    assert second_download in downloaded_exports()
+
+    marked = selected[2]
+    rename_url = f"/api/rvc/projects/{marked['project_id']}/exports/{marked['export_id']}"
+    assert client.patch(rename_url, json={"batch_name": "新的批次名"}).status_code == 200
+    assert first_download <= downloaded_exports()
 
     post(client, "/api/rvc/history/remove", {"exports": [selected[1]]})
     assert client.post(url, json={"exports": [selected[1]]}).status_code == 404

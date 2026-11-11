@@ -148,11 +148,16 @@ def _saved_exports(root: Path, project_id: str) -> list[SavedExport]:
     return batches
 
 
-def list_exports(project_id: str, removed_ids: Collection[str] = ()) -> list[dict]:
-    return [
-        _export_result(project_id, batch) for batch in reversed(_saved_exports(export_root(project_id), project_id))
-        if batch.export_id not in removed_ids
-    ]
+def list_exports(project_id: str, removed_ids: Collection[str] = (), downloaded_ids: Collection[str] = ()) -> list[dict]:
+    batches = []
+    for batch in reversed(_saved_exports(export_root(project_id), project_id)):
+        if batch.export_id in removed_ids:
+            continue
+        result = _export_result(project_id, batch)
+        if batch.export_id in downloaded_ids:
+            result["downloaded"] = True
+        batches.append(result)
+    return batches
 
 
 def find_batch_archives(project_id: str, export_ids: Collection[str]) -> dict[str, tuple[str, Path]]:

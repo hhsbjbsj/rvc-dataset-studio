@@ -89,6 +89,7 @@ export function RvcBundleDownload({ entries, disabled }: { entries: ExportRefere
     if (!finished.length) return
     setTrackedDownloads(current => current.filter(url => !finished.includes(url)))
     if (statuses.some(result => result.data?.status === 'completed')) {
+      void queryClient.invalidateQueries({ queryKey: ['rvc-exports'] })
       void queryClient.invalidateQueries({ queryKey: exportSelectionKey })
     }
   }, [queryClient, savingSelection, statuses, trackedDownloads])
@@ -163,6 +164,7 @@ export function RvcExportList({ projectId, batches, selection, actionsDisabled }
                 onChange={event => selection.toggle(batch.export_id, event.target.checked)} />
             )}
             <span className="break-words">{label}{batch.scope && ' · ' + t(batch.scope === 'selected' ? 'export.selected' : 'export.kept')} · {t('export.stats', { count: batch.count, duration: timestamp(batch.duration_seconds), rate: batch.sample_rate })}</span>
+            {batch.downloaded && <span className="badge badge-ok">{t('export.downloaded')}</span>}
             <time dateTime={batch.created_at}>{new Date(batch.created_at).toLocaleString(locale)}</time>
             <a className="btn btn-secondary btn-sm" href={API_URL + batch.download_url} aria-label={t('zip.download') + ' · ' + label}>{t('zip.download')}</a>
             <button type="button" className="btn btn-secondary btn-sm" disabled={openFolder.isPending}
