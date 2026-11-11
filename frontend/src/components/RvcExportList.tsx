@@ -5,7 +5,7 @@ import { isAxiosError } from 'axios'
 import toast from 'react-hot-toast'
 import { api } from '@/lib/api'
 import { API_URL } from '@/lib/config'
-import { timestamp, type ExportBatch } from '@/lib/rvc'
+import { timestamp, type ExportBatch, type ExportReference } from '@/lib/rvc'
 
 type ExportSelection = {
   isSelected: (id: string) => boolean
@@ -26,6 +26,34 @@ export function RvcExportSearch({ value, onChange, count }: { value: string; onC
         {value.trim() && (count ? t('export.searchCount', { count }) : t('export.noSearchResults'))}
       </p>
     </div>
+  )
+}
+
+export function RvcBundleDownload({ entries, disabled }: { entries: ExportReference[]; disabled?: boolean }) {
+  const { t, diagnostic } = useI18n()
+  const bundle = useMutation({
+    mutationFn: async (exports: ExportReference[]) => (
+      await api.post<{ download_url: string }>('/api/rvc/exports/bundles', { exports })
+    ).data,
+    onSuccess: ({ download_url }) => {
+      const link = document.createElement('a')
+      link.href = API_URL + download_url
+      link.download = ''
+      link.hidden = true
+      document.body.append(link)
+      link.click()
+      link.remove()
+    },
+    onError: error => {
+      const detail = isAxiosError(error) ? error.response?.data?.detail : undefined
+      toast.error(typeof detail === 'string' ? diagnostic(detail) : t('export.bundleFailed'))
+    },
+  })
+  return (
+    <button type="button" className="btn btn-primary btn-sm" disabled={disabled || !entries.length || bundle.isPending}
+      aria-busy={bundle.isPending} onClick={() => bundle.mutate(entries)}>
+      {bundle.isPending ? t('export.bundling') : t('export.bundleSelected', { count: entries.length })}
+    </button>
   )
 }
 

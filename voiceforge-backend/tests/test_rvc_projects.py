@@ -21,7 +21,7 @@ from config import rvc_export_root
 from database import Job, SessionLocal
 from main import app
 from processing.rvc_audio import MediaError, write_clip
-from processing.rvc_export import migrate_export_folders
+from processing.rvc_export import export_bundle_path, migrate_export_folders
 from rvc_projects import RvcClip, clip_path, export_root, new_id, work_dir
 from sources.rvc_online import normalize_url
 
@@ -383,6 +383,54 @@ def test_remove_selected_history_preserves_files_and_batch_numbers(client):
     assert (migrated / "wavs" / "sample.wav").read_bytes() == b"audio"
     assert client.get(download_url).content == original_zip
     assert [batch["batch_number"] for batch in client.get(base + "/exports").json()] == [3, 2]
+
+
+def test_download_selected_export_batches_as_one_zip(client):
+    selected = []
+    folders = []
+    for project_index in range(2):
+        base = new_project(client)
+        project_id = base.rsplit("/", 1)[-1]
+        for number in (1, 2) if project_index == 0 else (1,):
+            export_id = new_id()
+            folder = export_root(project_id) / f"第{number:03d}批 [{export_id}]"
+            folder.mkdir(parents=True)
+            dataset = {"created_at": f"2026-01-0{number}T00:00:00+00:00", "count": 1,
+                       "duration_seconds": 1, "sample_rate": 40000, "batch_name": "角色甲"}
+            (folder / "metadata.json").write_text(json.dumps({"dataset": dataset}), encoding="utf-8")
+            clip = f"project-{project_index}-batch-{number}".encode()
+            with zipfile.ZipFile(folder / "dataset.zip", "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("wavs/sample.wav", clip)
+                archive.writestr("metadata.json", json.dumps({"dataset": dataset}))
+            selected.append({"project_id": project_id, "export_id": export_id})
+            folders.append(folder)
+
+    url = "/api/rvc/exports/bundles"
+    assert client.post(url, json={"exports": []}).status_code == 422
+    assert client.post(url, json={"exports": [{**selected[0], "export_id": new_id()}]}).status_code == 404
+    response = client.post(url, json={"exports": [selected[0], selected[2], selected[0]]})
+    assert response.status_code == 201, response.text
+    download_url = response.json()["download_url"]
+    assert export_bundle_path(download_url.rsplit("/", 1)[-1]).is_file()
+    response = client.get(download_url)
+    assert response.status_code == 200
+    assert unquote(response.headers["content-disposition"]).endswith("RVC-导出批次.zip")
+    with zipfile.ZipFile(io.BytesIO(response.content)) as bundle:
+        assert bundle.namelist() == [
+            "第001批 - 角色甲/wavs/sample.wav", "第001批 - 角色甲/metadata.json",
+            "第001批 - 角色甲 (2)/wavs/sample.wav", "第001批 - 角色甲 (2)/metadata.json",
+        ]
+        assert bundle.read("第001批 - 角色甲/wavs/sample.wav") == b"project-0-batch-1"
+        assert bundle.read("第001批 - 角色甲 (2)/wavs/sample.wav") == b"project-1-batch-1"
+        assert bundle.testzip() is None
+    assert client.get(download_url).status_code == 404
+    assert all((folder / "dataset.zip").is_file() for folder in folders)
+
+    post(client, "/api/rvc/history/remove", {"exports": [selected[1]]})
+    assert client.post(url, json={"exports": [selected[1]]}).status_code == 404
+    with zipfile.ZipFile(folders[0] / "dataset.zip", "w") as archive:
+        archive.writestr("../escaped.wav", b"invalid")
+    assert client.post(url, json={"exports": [selected[0]]}).status_code == 400
 
 
 def test_rename_legacy_exports_in_history(client, monkeypatch):

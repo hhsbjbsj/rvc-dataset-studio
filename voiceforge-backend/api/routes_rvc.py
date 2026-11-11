@@ -3,12 +3,13 @@
 import os
 import stat
 from collections import defaultdict
+from contextlib import ExitStack
 from pathlib import Path
 from threading import Lock
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
 from uuid import UUID
-from zipfile import BadZipFile
+from zipfile import BadZipFile, ZipFile
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse
@@ -16,6 +17,7 @@ from pydantic import BaseModel, Field, StringConstraints, model_validator
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from starlette.background import BackgroundTask
 
 from config import rvc_export_root
 from database import Job, RemovedHistoryEntry, get_db
@@ -23,7 +25,10 @@ from processing.rvc_audio import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS, MediaError,
 from processing.rvc_edit import (
     create_edit, create_edits, delete_buffered_clips, restore_buffer_audio, source_audio_info, source_audio_path, waveform_peaks,
 )
-from processing.rvc_export import export_dataset, find_export_archive, list_exports, rename_export
+from processing.rvc_export import (
+    bundle_exports, discard_export_bundle, export_bundle_path, export_dataset, find_batch_archives, find_export_archive,
+    list_exports, rename_export,
+)
 from processing.rvc_import import stage_conversion
 from rvc_projects import (
     RvcClip, RvcMergeBuffer, RvcProject, RvcSource, RvcWorkspace, active_clip, clip_data, clip_path, new_id, project_data,
@@ -76,6 +81,10 @@ class ExportHistoryEntry(BaseModel):
 class HistoryRemoval(BaseModel):
     exports: list[ExportHistoryEntry] = Field(default_factory=list)
     job_ids: list[Annotated[str, StringConstraints(min_length=1, max_length=100)]] = Field(default_factory=list, max_length=200)
+
+
+class ExportBundleInput(BaseModel):
+    exports: list[ExportHistoryEntry] = Field(min_length=1)
 
 
 class LocalImport(BaseModel):
@@ -671,6 +680,53 @@ def export_history(project_id: Identifier, db: DB):
     )))
     with export_history_lock:
         return list_exports(project_id, removed_ids)
+
+
+@router.post("/exports/bundles", status_code=201)
+def create_export_bundle(data: ExportBundleInput, db: DB):
+    requested = dict.fromkeys((entry.project_id, entry.export_id) for entry in data.exports)
+    grouped = defaultdict(set)
+    for project_id, export_id in requested:
+        grouped[project_id].add(export_id)
+    missing = "部分所选导出已不存在，请刷新历史记录。"
+    try:
+        with ExitStack() as stack:
+            with export_history_lock:
+                found = {}
+                for project_id, ids in grouped.items():
+                    get_project(db, project_id)
+                    removed = db.scalars(select(RemovedHistoryEntry.item_id).where(
+                        RemovedHistoryEntry.kind == "export", RemovedHistoryEntry.project_id == project_id,
+                    ))
+                    if not ids.isdisjoint(removed):
+                        raise HTTPException(404, missing)
+                    batches = find_batch_archives(project_id, ids)
+                    if batches.keys() != ids:
+                        raise HTTPException(404, missing)
+                    found[project_id] = batches
+                archives = []
+                for project_id, export_id in requested:
+                    name, path = found[project_id][export_id]
+                    archives.append((name, stack.enter_context(ZipFile(path))))
+            db.close()
+            bundle = bundle_exports(archives)
+    except MediaError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except (BadZipFile, NotImplementedError, RuntimeError, ValueError) as exc:
+        raise HTTPException(400, "无法读取所选批次的 ZIP。") from exc
+    except OSError as exc:
+        raise HTTPException(409, "无法打包所选批次，请检查导出 ZIP 和工作盘。") from exc
+    return {"download_url": f"/api/rvc/exports/bundles/{bundle.stem}"}
+
+
+@router.get("/exports/bundles/{bundle_id}")
+def download_export_bundle(bundle_id: Identifier, request: Request):
+    archive = export_bundle_path(bundle_id)
+    if not archive.is_file() or archive.resolve() != archive:
+        raise HTTPException(404, "合并下载已过期，请重新打包。")
+    cleanup = None if "range" in request.headers else BackgroundTask(discard_export_bundle, archive)
+    return FileResponse(archive, media_type="application/zip", filename="RVC-导出批次.zip",
+                        headers={"Cache-Control": "no-store"}, background=cleanup)
 
 
 @router.post("/history/remove")

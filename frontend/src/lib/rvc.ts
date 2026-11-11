@@ -3,6 +3,8 @@ export type ExportBatch = {
   created_at: string; sample_rate: number; scope?: 'selected' | 'kept'; batch_number?: number; batch_name?: string
 }
 
+export type ExportReference = { project_id: string; export_id: string }
+
 export function filterExportBatches(batches: ExportBatch[], projectCharacter: string, search: string) {
   const query = search.trim().normalize('NFKC').toLowerCase()
   if (!query) return batches

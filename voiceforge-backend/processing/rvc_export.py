@@ -5,13 +5,15 @@ import logging
 import re
 import shutil
 import tempfile
+import time
 import zipfile
 from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Literal
 
+from config import get_settings
 from processing.rvc_audio import MediaError, WORK_RATE, check_space, ffmpeg, media_path
 from rvc_projects import export_root, new_id
 
@@ -19,6 +21,7 @@ logger = logging.getLogger(__name__)
 LEGACY_ID = re.compile(r"[0-9a-f]{32}")
 LEGACY_BATCH = re.compile(r"第([0-9]{1,9})批 \[([0-9a-f]{32})\]")
 NAMED_BATCH = re.compile(r"第([0-9]{1,9})批(?: - .+)?")
+WINDOWS_INVALID = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
 @dataclass
@@ -79,7 +82,7 @@ def find_export_archive(project_id: str, export_id: str) -> Path | None:
 
 
 def _windows_folder_label(label: str) -> str:
-    safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", label).strip(" .")[:36].rstrip(" .")
+    safe = WINDOWS_INVALID.sub("_", label).strip(" .")[:36].rstrip(" .")
     return "_" + safe if PureWindowsPath(safe).is_reserved() else safe
 
 
@@ -150,6 +153,98 @@ def list_exports(project_id: str, removed_ids: Collection[str] = ()) -> list[dic
         _export_result(project_id, batch) for batch in reversed(_saved_exports(export_root(project_id), project_id))
         if batch.export_id not in removed_ids
     ]
+
+
+def find_batch_archives(project_id: str, export_ids: Collection[str]) -> dict[str, tuple[str, Path]]:
+    archives = {}
+    for batch in _saved_exports(export_root(project_id), project_id):
+        if batch.export_id not in export_ids:
+            continue
+        archive = _export_archive(batch.folder)
+        if archive is not None:
+            label = batch.summary.get("batch_name")
+            name = _batch_folder_name(batch.batch_number, label if isinstance(label, str) else "")
+            archives[batch.export_id] = (name, archive)
+    return archives
+
+
+def _export_bundle_root() -> Path:
+    return get_settings().TEMP_DIR.resolve() / "rvc-bundles"
+
+
+def export_bundle_path(bundle_id: str) -> Path:
+    return _export_bundle_root() / f"{bundle_id}.zip"
+
+
+def discard_export_bundle(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        logger.warning("Could not remove temporary export ZIP %s", path, exc_info=True)
+
+
+def cleanup_export_bundles() -> None:
+    root = _export_bundle_root()
+    cutoff = time.time() - 24 * 60 * 60
+    try:
+        if root.resolve() != root:
+            return
+        for path in root.glob("*"):
+            if path.suffix in {".zip", ".part"} and LEGACY_ID.fullmatch(path.stem) and path.is_file():
+                if path.stat().st_mtime < cutoff:
+                    discard_export_bundle(path)
+    except OSError:
+        logger.warning("Could not check temporary export ZIPs in %s", root, exc_info=True)
+
+
+def bundle_exports(archives: list[tuple[str, zipfile.ZipFile]]) -> Path:
+    folders: set[str] = set()
+    members = []
+    required = 0
+    for name, archive in archives:
+        folder = name
+        number = 2
+        while folder.casefold() in folders:
+            folder = f"{name} ({number})"
+            number += 1
+        folders.add(folder.casefold())
+        seen: set[str] = set()
+        for entry in archive.infolist():
+            if entry.is_dir():
+                continue
+            path = PurePosixPath(entry.filename)
+            member_name = path.as_posix()
+            key = member_name.casefold()
+            if not path.parts or any(
+                WINDOWS_INVALID.search(part) or part.endswith((" ", ".")) or PureWindowsPath(part).is_reserved()
+                for part in path.parts
+            ) or key in seen:
+                raise MediaError("无法读取所选批次的 ZIP。")
+            seen.add(key)
+            filename = f"{folder}/{member_name}"
+            members.append((archive, entry, filename))
+            required += entry.file_size + 2 * len(filename.encode("utf-8")) + 150
+        if not seen:
+            raise MediaError("无法读取所选批次的 ZIP。")
+
+    output = export_bundle_path(new_id())
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if output.parent.resolve() != output.parent:
+        raise OSError("Export bundle directory is not a local directory")
+    cleanup_export_bundles()
+    check_space(output.parent, required)
+    stage = output.with_suffix(".part")
+    try:
+        with zipfile.ZipFile(stage, "x", compression=zipfile.ZIP_STORED) as bundle:
+            for archive, entry, filename in members:
+                info = zipfile.ZipInfo(filename, entry.date_time)
+                info.file_size = entry.file_size
+                with archive.open(entry) as source, bundle.open(info, "w") as target:
+                    shutil.copyfileobj(source, target, length=1024 * 1024)
+        stage.rename(output)
+    finally:
+        discard_export_bundle(stage)
+    return output
 
 
 def rename_export(project_id: str, export_id: str, batch_name: str) -> dict | None:

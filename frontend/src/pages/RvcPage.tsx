@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { isAxiosError } from 'axios'
 import { RvcAudioRangeEditor, RvcManualEditor, type AudioRange } from '@/components/RvcManualEditor'
-import { RvcExportList, RvcExportSearch } from '@/components/RvcExportList'
+import { RvcBundleDownload, RvcExportList, RvcExportSearch } from '@/components/RvcExportList'
 import { RvcSources, type Project, type RunAction } from '@/components/RvcSources'
 import { api } from '@/lib/api'
 import { API_URL } from '@/lib/config'
@@ -65,6 +65,7 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
   const [sampleRate, setSampleRate] = useState(40000)
   const [batchName, setBatchName] = useState('')
   const [exportSearch, setExportSearch] = useState('')
+  const [selectedExports, setSelectedExports] = useState<string[]>([])
   const [manualClip, setManualClip] = useState<ManualClip>()
   const [trimTarget, setTrimTarget] = useState<Clip>()
   const [trimResults, setTrimResults] = useState<Clip[]>([])
@@ -95,6 +96,8 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
   })
   const batches = exportHistory.data ?? []
   const matchingBatches = filterExportBatches(batches, project.character, exportSearch)
+  const selectedBatches = matchingBatches.filter(batch => selectedExports.includes(batch.export_id))
+    .map(batch => ({ project_id: id, export_id: batch.export_id }))
   const bufferKey = ['rvc-merge-buffer', id]
   const buffer = useQuery({
     queryKey: bufferKey,
@@ -426,8 +429,18 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
             {exportHistory.isPending && <p className="text-sm text-lo">{t('rvc.loadingExports')}</p>}
             {exportHistory.isError && <p role="alert" className="text-sm text-lo">{t('rvc.exportsFailed')}{' ' + diagnostic(message(exportHistory.error))}</p>}
             {exportHistory.isSuccess && !batches.length && <p className="text-sm text-lo">{t('rvc.noExports')}</p>}
-            {!!batches.length && <RvcExportSearch value={exportSearch} onChange={setExportSearch} count={matchingBatches.length} />}
-            {!!matchingBatches.length && <RvcExportList projectId={id} batches={matchingBatches} />}
+            {!!batches.length && (
+              <div className="flex flex-wrap items-center gap-3">
+                <RvcExportSearch value={exportSearch} onChange={setExportSearch} count={matchingBatches.length} />
+                <RvcBundleDownload entries={selectedBatches} />
+              </div>
+            )}
+            {!!matchingBatches.length && <RvcExportList projectId={id} batches={matchingBatches} selection={{
+              isSelected: exportId => selectedExports.includes(exportId),
+              toggle: (exportId, checked) => setSelectedExports(current => checked
+                ? [...current, exportId] : current.filter(value => value !== exportId)),
+              disabled: false,
+            }} />}
           </div>
         </section>
         <ul className="space-y-3">

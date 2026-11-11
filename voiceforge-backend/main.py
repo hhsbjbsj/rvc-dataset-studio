@@ -21,7 +21,7 @@ from api.routes_search import router as search_router
 from api.routes_history import router as history_router
 from api.websocket import router as ws_router
 from api.routes_rvc import router as rvc_router
-from processing.rvc_export import migrate_export_folders
+from processing.rvc_export import cleanup_export_bundles, migrate_export_folders
 from rvc_projects import RvcProject, project_data
 from workers.rvc_worker import RvcWorker
 
@@ -43,6 +43,7 @@ async def lifespan(app: FastAPI):
         await asyncio.to_thread(migrate_export_folders, projects)
     except OSError:
         logger.warning("Could not organize existing RVC export folders", exc_info=True)
+    await asyncio.to_thread(cleanup_export_bundles)
     worker = RvcWorker()
     app.state.rvc_worker = worker
     worker.start()
