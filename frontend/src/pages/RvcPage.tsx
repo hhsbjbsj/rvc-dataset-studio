@@ -4,11 +4,12 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { isAxiosError } from 'axios'
 import { RvcAudioRangeEditor, RvcManualEditor, type AudioRange } from '@/components/RvcManualEditor'
-import { RvcBundleDownload, RvcExportFilters, RvcExportList, RvcResultSelection } from '@/components/RvcExportList'
+import { RvcBundleDownload, RvcExportFilters, RvcExportList, RvcExportSelectionError, RvcResultSelection } from '@/components/RvcExportList'
 import { RvcSources, type Project, type RunAction } from '@/components/RvcSources'
 import { api } from '@/lib/api'
 import { API_URL } from '@/lib/config'
-import { filterExportBatches, timestamp, updateSelection, type ExportBatch } from '@/lib/rvc'
+import { filterExportBatches, timestamp, type ExportBatch } from '@/lib/rvc'
+import { useRvcExportSelection } from '@/lib/useRvcExportSelection'
 
 type Track = { index: number; codec: string; sample_rate: number; channels: number; language?: string; title?: string }
 type Source = {
@@ -66,7 +67,7 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
   const [batchName, setBatchName] = useState('')
   const [exportSearch, setExportSearch] = useState('')
   const [selectedOnly, setSelectedOnly] = useState(false)
-  const [selectedExports, setSelectedExports] = useState<Set<string>>(() => new Set())
+  const saved = useRvcExportSelection()
   const [manualClip, setManualClip] = useState<ManualClip>()
   const [trimTarget, setTrimTarget] = useState<Clip>()
   const [trimResults, setTrimResults] = useState<Clip[]>([])
@@ -97,9 +98,10 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
   })
   const batches = exportHistory.data ?? []
   const visibleBatches = filterExportBatches(batches, project.character, selectedOnly ? '' : exportSearch,
-    selectedOnly ? exportId => selectedExports.has(exportId) : undefined)
-  const selectedBatches = visibleBatches.filter(batch => selectedExports.has(batch.export_id))
-    .map(batch => ({ project_id: id, export_id: batch.export_id }))
+    selectedOnly ? exportId => saved.has(id, exportId) : undefined)
+  const visibleExports = visibleBatches.map(batch => ({ project_id: id, export_id: batch.export_id }))
+  const selectedBatches = visibleExports.filter(entry => saved.has(id, entry.export_id))
+  const exportSelectionDisabled = !saved.entries || saved.saving
   const bufferKey = ['rvc-merge-buffer', id]
   const buffer = useQuery({
     queryKey: bufferKey,
@@ -431,22 +433,22 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
             {exportHistory.isPending && <p className="text-sm text-lo">{t('rvc.loadingExports')}</p>}
             {exportHistory.isError && <p role="alert" className="text-sm text-lo">{t('rvc.exportsFailed')}{' ' + diagnostic(message(exportHistory.error))}</p>}
             {exportHistory.isSuccess && !batches.length && <p className="text-sm text-lo">{t('rvc.noExports')}</p>}
+            {!!batches.length && saved.loadError && <RvcExportSelectionError onRetry={() => void saved.reload()} />}
             {!!batches.length && (
               <div className="flex flex-wrap items-center gap-3">
                 <RvcExportFilters value={exportSearch} onChange={setExportSearch} count={visibleBatches.length}
-                  selectedOnly={selectedOnly} onSelectedOnlyChange={setSelectedOnly} />
+                  selectedOnly={selectedOnly} onSelectedOnlyChange={setSelectedOnly} selectionReady={!!saved.entries} />
                 {!selectedOnly && (
-                  <RvcResultSelection count={visibleBatches.length} selectedCount={selectedBatches.length}
-                    onChange={checked => setSelectedExports(current => updateSelection(current,
-                      visibleBatches.map(batch => batch.export_id), checked))} />
+                  <RvcResultSelection count={visibleExports.length} selectedCount={selectedBatches.length} disabled={exportSelectionDisabled}
+                    onChange={checked => saved.update(visibleExports, checked)} />
                 )}
-                <RvcBundleDownload entries={selectedBatches} />
+                <RvcBundleDownload entries={selectedBatches} disabled={exportSelectionDisabled} />
               </div>
             )}
             {!!visibleBatches.length && <RvcExportList projectId={id} batches={visibleBatches} selection={{
-              isSelected: exportId => selectedExports.has(exportId),
-              toggle: (exportId, checked) => setSelectedExports(current => updateSelection(current, [exportId], checked)),
-              disabled: false,
+              isSelected: exportId => saved.has(id, exportId),
+              toggle: (exportId, checked) => saved.update([{ project_id: id, export_id: exportId }], checked),
+              disabled: exportSelectionDisabled,
             }} />}
           </div>
         </section>

@@ -37,6 +37,13 @@ class RvcWorkspace(Base):
     project_id: Mapped[str] = mapped_column(ForeignKey("rvc_projects.id"))
 
 
+class RvcExportSelection(Base):
+    __tablename__ = "rvc_export_selections"
+
+    project_id: Mapped[str] = mapped_column(ForeignKey("rvc_projects.id"), primary_key=True)
+    export_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+
+
 class RvcSource(Base):
     __tablename__ = "rvc_sources"
     __table_args__ = (UniqueConstraint("project_id", "source_key"),)

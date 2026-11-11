@@ -13,9 +13,9 @@ type ExportSelection = {
   disabled: boolean
 }
 
-export function RvcExportFilters({ value, onChange, count, selectedOnly, onSelectedOnlyChange }: {
+export function RvcExportFilters({ value, onChange, count, selectedOnly, onSelectedOnlyChange, selectionReady }: {
   value: string; onChange: (value: string) => void; count: number
-  selectedOnly: boolean; onSelectedOnlyChange: (value: boolean) => void
+  selectedOnly: boolean; onSelectedOnlyChange: (value: boolean) => void; selectionReady: boolean
 }) {
   const { t } = useI18n()
   return (
@@ -33,8 +33,19 @@ export function RvcExportFilters({ value, onChange, count, selectedOnly, onSelec
         </div>
       )}
       <button type="button" className={`btn btn-sm ${selectedOnly ? 'btn-primary' : 'btn-secondary'}`}
-        aria-pressed={selectedOnly} onClick={() => onSelectedOnlyChange(!selectedOnly)}>{t('export.selectedOnly')}</button>
+        aria-pressed={selectedOnly} disabled={!selectedOnly && !selectionReady}
+        onClick={() => onSelectedOnlyChange(!selectedOnly)}>{t('export.selectedOnly')}</button>
       {selectedOnly && count === 0 && <p role="status" className="text-sm text-lo">{t('export.noSelectedBatches')}</p>}
+    </div>
+  )
+}
+
+export function RvcExportSelectionError({ onRetry }: { onRetry: () => void }) {
+  const { t } = useI18n()
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-sm text-lo">
+      <p role="alert">{t('export.loadSelectionFailed')}</p>
+      <button type="button" className="btn btn-secondary btn-sm" onClick={onRetry}>{t('retry')}</button>
     </div>
   )
 }
@@ -81,7 +92,9 @@ export function RvcBundleDownload({ entries, disabled }: { entries: ExportRefere
   )
 }
 
-export function RvcExportList({ projectId, batches, selection }: { projectId: string; batches: ExportBatch[]; selection?: ExportSelection }) {
+export function RvcExportList({ projectId, batches, selection, actionsDisabled }: {
+  projectId: string; batches: ExportBatch[]; selection?: ExportSelection; actionsDisabled?: boolean
+}) {
   const { t, locale, diagnostic } = useI18n()
   const queryClient = useQueryClient()
   const [editing, setEditing] = useState<{ id: string; name: string }>()
@@ -135,7 +148,7 @@ export function RvcExportList({ projectId, batches, selection }: { projectId: st
                   onClick={() => setEditing(undefined)}>{t('export.cancelRename')}</button>
               </form>
             ) : (
-              <button type="button" className="btn btn-secondary btn-sm" disabled={rename.isPending || selection?.disabled}
+              <button type="button" className="btn btn-secondary btn-sm" disabled={rename.isPending || actionsDisabled}
                 aria-label={t('export.renameBatch', { name: label })}
                 onClick={() => setEditing({ id: batch.export_id, name: batch.batch_name ?? '' })}>{t('export.rename')}</button>
             )}

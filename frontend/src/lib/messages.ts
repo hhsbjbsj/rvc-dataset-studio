@@ -75,6 +75,8 @@ export const messages = {
   'export.deselectResults': ["取消全选", "Deselect results", "表示中の選択を解除"],
   'export.selectedOnly': ["只看已选", "Show selected only", "選択済みのみ表示"],
   'export.noSelectedBatches': ["还没有勾选导出批次。", "No export batches selected.", "書き出しバッチが選択されていません。"],
+  'export.loadSelectionFailed': ["无法恢复已保存的勾选。", "Could not restore the saved selection.", "保存済みの選択を復元できませんでした。"],
+  'export.saveSelectionFailed': ["无法保存导出批次的勾选。", "Could not save the export batch selection.", "書き出しバッチの選択を保存できませんでした。"],
   'export.bundleSelected': ["打包所选批次（{count}）", "Download selected batches ({count})", "選択したバッチをまとめて保存（{count}）"],
   'export.bundling': ["正在打包…", "Packaging batches…", "バッチをまとめています…"],
   'export.bundleFailed': ["无法打包所选批次。", "Could not package the selected batches.", "選択したバッチをまとめられませんでした。"],

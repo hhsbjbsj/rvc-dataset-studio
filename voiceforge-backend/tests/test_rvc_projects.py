@@ -349,6 +349,19 @@ def test_remove_selected_history_preserves_files_and_batch_numbers(client):
             "created_at": f"2026-01-0{index}T00:00:00+00:00", "count": 1, "duration_seconds": 1, "sample_rate": 40000,
         }}), encoding="utf-8")
 
+    selection_url = "/api/rvc/exports/selection"
+    refs = [{"project_id": project_id, "export_id": export_id} for export_id in export_ids]
+
+    def saved_exports():
+        return {entry["export_id"] for entry in client.get(selection_url).json() if entry["project_id"] == project_id}
+
+    assert client.patch(selection_url, json={"exports": refs[:2], "selected": True}).status_code == 200
+    assert client.patch(selection_url, json={"exports": refs[:2], "selected": True}).status_code == 200
+    assert saved_exports() == set(export_ids[:2])
+    missing = {"project_id": project_id, "export_id": new_id()}
+    assert client.patch(selection_url, json={"exports": [refs[2], missing], "selected": True}).status_code == 404
+    assert saved_exports() == set(export_ids[:2])
+
     removed_job, kept_job, active_job = [new_id() for _ in range(3)]
     with SessionLocal.begin() as db:
         db.add_all([Job(id=job_id, query="Test conversion", query_type="conversion", status=status)
@@ -362,6 +375,10 @@ def test_remove_selected_history_preserves_files_and_batch_numbers(client):
     assert len(client.get(base + "/exports").json()) == 3
     assert post(client, remove_url, selection) == {"removed": 2}
     assert post(client, remove_url, selection) == {"removed": 2}
+    assert saved_exports() == {export_ids[1]}
+    assert client.patch(selection_url, json={"exports": refs[:1], "selected": True}).status_code == 404
+    assert client.patch(selection_url, json={"exports": refs[1:2], "selected": False}).status_code == 200
+    assert not saved_exports()
     remaining = client.get(base + "/exports").json()
     assert [(row["export_id"], row["batch_number"]) for row in remaining] == [(export_ids[2], 3), (export_ids[1], 2)]
     global_history = client.get("/api/rvc/exports").json()

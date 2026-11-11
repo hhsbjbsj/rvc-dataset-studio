@@ -31,8 +31,8 @@ from processing.rvc_export import (
 )
 from processing.rvc_import import stage_conversion
 from rvc_projects import (
-    RvcClip, RvcMergeBuffer, RvcProject, RvcSource, RvcWorkspace, active_clip, clip_data, clip_path, new_id, project_data,
-    source_data, work_dir,
+    RvcClip, RvcExportSelection, RvcMergeBuffer, RvcProject, RvcSource, RvcWorkspace, active_clip, clip_data, clip_path,
+    new_id, project_data, source_data, work_dir,
 )
 from sources.rvc_online import resolve_source_url, search_bilibili_page
 from workers.rvc_worker import update_source
@@ -83,8 +83,12 @@ class HistoryRemoval(BaseModel):
     job_ids: list[Annotated[str, StringConstraints(min_length=1, max_length=100)]] = Field(default_factory=list, max_length=200)
 
 
-class ExportBundleInput(BaseModel):
+class ExportBatchList(BaseModel):
     exports: list[ExportHistoryEntry] = Field(min_length=1)
+
+
+class ExportSelectionInput(ExportBatchList):
+    selected: bool
 
 
 class LocalImport(BaseModel):
@@ -682,8 +686,38 @@ def export_history(project_id: Identifier, db: DB):
         return list_exports(project_id, removed_ids)
 
 
+@router.get("/exports/selection")
+def saved_export_selection(db: DB) -> list[ExportHistoryEntry]:
+    rows = db.execute(select(RvcExportSelection.project_id, RvcExportSelection.export_id))
+    return [ExportHistoryEntry(project_id=project_id, export_id=export_id) for project_id, export_id in rows]
+
+
+@router.patch("/exports/selection")
+def update_export_selection(data: ExportSelectionInput, db: DB) -> list[ExportHistoryEntry]:
+    requested = {(entry.project_id, entry.export_id) for entry in data.exports}
+    with export_history_lock:
+        current = {(row.project_id, row.export_id): row for row in db.scalars(select(RvcExportSelection))}
+        if data.selected:
+            additions = defaultdict(set)
+            for project_id, export_id in requested - current.keys():
+                additions[project_id].add(export_id)
+            for project_id, ids in additions.items():
+                get_project(db, project_id)
+                removed = db.scalars(select(RemovedHistoryEntry.item_id).where(
+                    RemovedHistoryEntry.kind == "export", RemovedHistoryEntry.project_id == project_id,
+                ))
+                if not ids.isdisjoint(removed) or find_batch_archives(project_id, ids).keys() != ids:
+                    raise HTTPException(404, "部分所选导出已不存在，请刷新历史记录。")
+                db.add_all(RvcExportSelection(project_id=project_id, export_id=export_id) for export_id in ids)
+        else:
+            for key in requested & current.keys():
+                db.delete(current[key])
+        db.commit()
+        return saved_export_selection(db)
+
+
 @router.post("/exports/bundles", status_code=201)
-def create_export_bundle(data: ExportBundleInput, db: DB):
+def create_export_bundle(data: ExportBatchList, db: DB):
     requested = dict.fromkeys((entry.project_id, entry.export_id) for entry in data.exports)
     grouped = defaultdict(set)
     for project_id, export_id in requested:
@@ -741,6 +775,9 @@ def remove_history(data: HistoryRemoval, db: DB):
                 raise HTTPException(404, "部分所选导出已不存在，请刷新历史记录。")
         for project_id, export_id in exports:
             db.merge(RemovedHistoryEntry(kind="export", project_id=project_id, item_id=export_id))
+            selected = db.get(RvcExportSelection, (project_id, export_id))
+            if selected is not None:
+                db.delete(selected)
         for job_id, _ in jobs:
             db.merge(RemovedHistoryEntry(kind="job", project_id="", item_id=job_id))
         db.commit()

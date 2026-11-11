@@ -6,16 +6,16 @@ import { Download, RefreshCw, Trash2, Clock, Layers, Eye, Calendar, Loader2 } fr
 import toast from 'react-hot-toast'
 import { api, getHistory } from '@/lib/api'
 import { BrandMark } from '@/components/BrandMark'
-import { RvcBundleDownload, RvcExportFilters, RvcExportList, RvcResultSelection } from '@/components/RvcExportList'
+import { RvcBundleDownload, RvcExportFilters, RvcExportList, RvcExportSelectionError, RvcResultSelection } from '@/components/RvcExportList'
 import type { Project } from '@/components/RvcSources'
 import { filterExportBatches, updateSelection, type ExportBatch, type ExportReference } from '@/lib/rvc'
+import { exportSelectionKey, useRvcExportSelection } from '@/lib/useRvcExportSelection'
 
 type RvcExportGroup = { project: Project; batches: ExportBatch[] }
 type HistorySelection = { exports: ExportReference[]; job_ids: string[] }
 
 const ACTIVE = ['queued', 'searching', 'downloading', 'processing', 'packaging']
 const FINISHED = new Set(['done', 'failed', 'cancelled', 'canceled'])
-const exportKey = (projectId: string, exportId: string) => `export:${projectId}:${exportId}`
 
 function statusClass(status: string) {
   if (status === 'done') return 'badge badge-ok'
@@ -34,7 +34,8 @@ function dotClass(status: string) {
 export function HistoryPage() {
   const { t, locale } = useI18n()
   const queryClient = useQueryClient()
-  const [selected, setSelected] = useState<Set<string>>(() => new Set())
+  const [selectedJobs, setSelectedJobs] = useState<Set<string>>(() => new Set())
+  const saved = useRvcExportSelection()
   const [exportSearch, setExportSearch] = useState('')
   const [selectedOnly, setSelectedOnly] = useState(false)
   const { data: history, refetch, isLoading, isError, isFetching } = useQuery({
@@ -53,20 +54,21 @@ export function HistoryPage() {
   const visibleGroups = (rvcHistory.data ?? []).map(({ project, batches }) => ({
     project,
     batches: filterExportBatches(batches, project.character, selectedOnly ? '' : exportSearch,
-      selectedOnly ? exportId => selected.has(exportKey(project.id, exportId)) : undefined),
+      selectedOnly ? exportId => saved.has(project.id, exportId) : undefined),
   })).filter(({ batches }) => batches.length > 0)
   const visibleExports = visibleGroups.flatMap(({ project, batches }) => batches
     .map(batch => ({ project_id: project.id, export_id: batch.export_id })))
   const selection: HistorySelection = {
-    exports: visibleExports.filter(entry => selected.has(exportKey(entry.project_id, entry.export_id))),
-    job_ids: (history ?? []).filter(job => FINISHED.has(job.status) && selected.has(`job:${job.id}`)).map(job => job.id),
+    exports: visibleExports.filter(entry => saved.has(entry.project_id, entry.export_id)),
+    job_ids: (history ?? []).filter(job => FINISHED.has(job.status) && selectedJobs.has(job.id)).map(job => job.id),
   }
   const selectedCount = selection.exports.length + selection.job_ids.length
   const remove = useMutation({
     mutationFn: async (items: HistorySelection) => (await api.post<{ removed: number }>('/api/rvc/history/remove', items)).data,
     onSuccess: async ({ removed }) => {
-      setSelected(new Set())
+      setSelectedJobs(new Set())
       await Promise.all([
+        queryClient.invalidateQueries({ queryKey: exportSelectionKey }),
         queryClient.invalidateQueries({ queryKey: ['rvc-exports'] }),
         queryClient.invalidateQueries({ queryKey: ['history'] }),
       ])
@@ -75,7 +77,7 @@ export function HistoryPage() {
     onError: () => toast.error(t('history.removeFailed')),
   })
 
-  const toggle = (key: string, checked: boolean) => setSelected(current => updateSelection(current, [key], checked))
+  const exportSelectionDisabled = !saved.entries || saved.saving || remove.isPending
 
   const removeSelected = () => {
     if (selectedCount && window.confirm(t('history.removeConfirm', { count: selectedCount }))) remove.mutate(selection)
@@ -103,6 +105,7 @@ export function HistoryPage() {
         <button onClick={() => {
           void refetch()
           void rvcHistory.refetch()
+          void saved.reload()
         }} className="btn-secondary btn-sm">
           <RefreshCw className={`h-3.5 w-3.5 ${isFetching || rvcHistory.isFetching ? 'animate-spin' : ''}`} strokeWidth={1.75} /> {t('history.refresh')}
         </button>
@@ -111,9 +114,12 @@ export function HistoryPage() {
       {!!(rvcHistory.data?.length || history?.some(job => FINISHED.has(job.status))) && (
         <div className="flex flex-wrap items-center gap-3">
           <span className="text-sm text-mid" aria-live="polite">{t('history.recordsSelected', { count: selectedCount })}</span>
-          <button type="button" className="btn btn-secondary btn-sm" disabled={!selectedCount || remove.isPending}
-            onClick={() => setSelected(new Set())}>{t('rvc.clearSelection')}</button>
-          <button type="button" className="btn btn-danger btn-sm" disabled={!selectedCount || remove.isPending} onClick={removeSelected}>
+          <button type="button" className="btn btn-secondary btn-sm" disabled={!selectedCount || saved.saving || remove.isPending}
+            onClick={() => {
+              setSelectedJobs(new Set())
+              saved.update(saved.entries ?? [], false)
+            }}>{t('rvc.clearSelection')}</button>
+          <button type="button" className="btn btn-danger btn-sm" disabled={!selectedCount || saved.saving || remove.isPending} onClick={removeSelected}>
             <Trash2 className="h-3.5 w-3.5" strokeWidth={1.75} /> {t('history.removeSelected')}
           </button>
         </div>
@@ -128,26 +134,26 @@ export function HistoryPage() {
         {rvcHistory.isPending && <p className="text-sm text-lo">{t('history.rvcLoading')}</p>}
         {rvcHistory.isError && <p role="alert" className="text-sm text-lo">{t('history.rvcError')}</p>}
         {rvcHistory.isSuccess && !rvcHistory.data.length && <p className="text-sm text-lo">{t('history.rvcEmpty')}</p>}
+        {!!rvcHistory.data?.length && saved.loadError && <RvcExportSelectionError onRetry={() => void saved.reload()} />}
         {!!rvcHistory.data?.length && (
           <div className="flex flex-wrap items-center gap-3">
             <RvcExportFilters value={exportSearch} onChange={setExportSearch} count={visibleExports.length}
-              selectedOnly={selectedOnly} onSelectedOnlyChange={setSelectedOnly} />
+              selectedOnly={selectedOnly} onSelectedOnlyChange={setSelectedOnly} selectionReady={!!saved.entries} />
             {!selectedOnly && (
-              <RvcResultSelection count={visibleExports.length} selectedCount={selection.exports.length} disabled={remove.isPending}
-                onChange={checked => setSelected(current => updateSelection(current,
-                  visibleExports.map(entry => exportKey(entry.project_id, entry.export_id)), checked))} />
+              <RvcResultSelection count={visibleExports.length} selectedCount={selection.exports.length} disabled={exportSelectionDisabled}
+                onChange={checked => saved.update(visibleExports, checked)} />
             )}
-            <RvcBundleDownload entries={selection.exports} disabled={remove.isPending} />
+            <RvcBundleDownload entries={selection.exports} disabled={exportSelectionDisabled} />
           </div>
         )}
         {visibleGroups.map(({ project, batches }) => (
           <article className="card space-y-3 !p-5" key={project.id}>
             <h3 className="break-all text-base font-medium text-hi">{project.character}</h3>
             <p className="break-all text-xs text-lo">{project.series} · {project.language}</p>
-            <RvcExportList projectId={project.id} batches={batches} selection={{
-              isSelected: id => selected.has(exportKey(project.id, id)),
-              toggle: (id, checked) => toggle(exportKey(project.id, id), checked),
-              disabled: remove.isPending,
+            <RvcExportList projectId={project.id} batches={batches} actionsDisabled={remove.isPending} selection={{
+              isSelected: id => saved.has(project.id, id),
+              toggle: (id, checked) => saved.update([{ project_id: project.id, export_id: id }], checked),
+              disabled: exportSelectionDisabled,
             }} />
           </article>
         ))}
@@ -178,8 +184,11 @@ export function HistoryPage() {
             <li key={job.id} className="card card-hover flex items-center justify-between gap-4 !p-5">
               {FINISHED.has(job.status) && (
                 <input type="checkbox" aria-label={t('history.selectItem', { name })}
-                  checked={selected.has(`job:${job.id}`)} disabled={remove.isPending}
-                  onChange={event => toggle(`job:${job.id}`, event.target.checked)} />
+                  checked={selectedJobs.has(job.id)} disabled={remove.isPending}
+                  onChange={event => {
+                    const checked = event.target.checked
+                    setSelectedJobs(current => updateSelection(current, [job.id], checked))
+                  }} />
               )}
               <Link className="min-w-0 flex-1 space-y-2 text-left" to={`/history/jobs/${job.id}`}>
                 <div className="flex flex-wrap items-center gap-2.5">
