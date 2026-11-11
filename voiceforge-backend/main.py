@@ -21,6 +21,7 @@ from api.routes_search import router as search_router
 from api.routes_history import router as history_router
 from api.websocket import router as ws_router
 from api.routes_rvc import router as rvc_router
+from api.routes_zip_editor import cleanup_zip_sessions, router as zip_editor_router
 from processing.rvc_export import cleanup_export_bundles, migrate_export_folders
 from rvc_projects import RvcProject, project_data
 from workers.rvc_worker import RvcWorker
@@ -44,6 +45,7 @@ async def lifespan(app: FastAPI):
     except OSError:
         logger.warning("Could not organize existing RVC export folders", exc_info=True)
     await asyncio.to_thread(cleanup_export_bundles)
+    await asyncio.to_thread(cleanup_zip_sessions)
     worker = RvcWorker()
     app.state.rvc_worker = worker
     worker.start()
@@ -79,6 +81,7 @@ app.include_router(search_router)
 app.include_router(history_router)
 app.include_router(ws_router)
 app.include_router(rvc_router)
+app.include_router(zip_editor_router)
 
 # Serve packaged outputs from wherever OUTPUT_DIR points (it may live outside the repo).
 settings.ensure_dirs()
@@ -97,7 +100,7 @@ if settings.RVC_SERVE_FRONTEND:
     def frontend_index():
         return FileResponse(frontend / "index.html", headers={"Cache-Control": "no-cache"})
 
-    for path in ("/", "/rvc", "/convert", "/history", "/history/jobs/{job_id}"):
+    for path in ("/", "/rvc", "/convert", "/zip-editor", "/history", "/history/jobs/{job_id}"):
         app.add_api_route(path, frontend_index, include_in_schema=False)
 
 

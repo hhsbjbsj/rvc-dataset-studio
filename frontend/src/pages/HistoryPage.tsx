@@ -6,7 +6,7 @@ import { Download, RefreshCw, Trash2, Clock, Layers, Eye, Calendar, Loader2 } fr
 import toast from 'react-hot-toast'
 import { api, getHistory } from '@/lib/api'
 import { BrandMark } from '@/components/BrandMark'
-import { RvcBundleDownload, RvcExportFilters, RvcExportList, RvcExportSelectionError, RvcResultSelection } from '@/components/RvcExportList'
+import { RvcBundleDownload, RvcExportFilters, RvcExportList, RvcExportSelectionError, RvcMarkUndownloaded, RvcResultSelection } from '@/components/RvcExportList'
 import type { Project } from '@/components/RvcSources'
 import { filterExportBatches, updateSelection, type ExportBatch, type ExportReference } from '@/lib/rvc'
 import { exportSelectionKey, useRvcExportSelection } from '@/lib/useRvcExportSelection'
@@ -61,6 +61,9 @@ export function HistoryPage() {
     }),
   })).filter(({ batches }) => batches.length > 0)
   const visibleExports = visibleGroups.flatMap(({ project, batches }) => batches
+    .map(batch => ({ project_id: project.id, export_id: batch.export_id })))
+  const selectedDownloaded = visibleGroups.flatMap(({ project, batches }) => batches
+    .filter(batch => batch.downloaded && saved.has(project.id, batch.export_id))
     .map(batch => ({ project_id: project.id, export_id: batch.export_id })))
   const selection: HistorySelection = {
     exports: visibleExports.filter(entry => saved.has(entry.project_id, entry.export_id)),
@@ -149,6 +152,7 @@ export function HistoryPage() {
                 onChange={checked => saved.update(visibleExports, checked)} />
             )}
             <RvcBundleDownload entries={selection.exports} disabled={exportSelectionDisabled} />
+            <RvcMarkUndownloaded entries={selectedDownloaded} disabled={exportSelectionDisabled} />
           </div>
         )}
         {visibleGroups.map(({ project, batches }) => (

@@ -5,6 +5,7 @@ import { RvcPage } from '@/pages/RvcPage'
 import { useI18n } from '@/lib/i18n'
 
 const ConvertPage = lazy(() => import('@/pages/ConvertPage').then(module => ({ default: module.ConvertPage })))
+const ZipEditorPage = lazy(() => import('@/pages/ZipEditorPage').then(module => ({ default: module.ZipEditorPage })))
 const HistoryPage = lazy(() => import('@/pages/HistoryPage').then(module => ({ default: module.HistoryPage })))
 const HistoryJobPage = lazy(() => import('@/pages/HistoryJobPage').then(module => ({ default: module.HistoryJobPage })))
 
@@ -19,6 +20,7 @@ export default function App() {
             <Route path="/" element={<Navigate to="/rvc" replace />} />
             <Route path="/rvc" element={<RvcPage />} />
             <Route path="/convert" element={<ConvertPage />} />
+            <Route path="/zip-editor" element={<ZipEditorPage />} />
             <Route path="/history" element={<HistoryPage />} />
             <Route path="/history/jobs/:jobId" element={<HistoryJobPage />} />
           </Routes>

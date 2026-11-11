@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react'
 import { queryOptions, useIsMutating, useMutation, useQueries, useQueryClient } from '@tanstack/react-query'
 import { isAxiosError } from 'axios'
 import toast from 'react-hot-toast'
-import { api } from '@/lib/api'
+import { api, downloadFile } from '@/lib/api'
 import { API_URL } from '@/lib/config'
 import { timestamp, type ExportBatch, type ExportReference } from '@/lib/rvc'
 import { exportSelectionKey } from '@/lib/useRvcExportSelection'
@@ -73,6 +73,29 @@ export function RvcResultSelection({ count, selectedCount, onChange, disabled }:
   )
 }
 
+function useMarkUndownloaded() {
+  const { t, diagnostic } = useI18n()
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (exports: ExportReference[]) => api.post('/api/rvc/exports/mark-undownloaded', { exports }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['rvc-exports'] }),
+    onError: error => {
+      const detail = isAxiosError(error) ? error.response?.data?.detail : undefined
+      toast.error(typeof detail === 'string' ? diagnostic(detail) : t('export.markUndownloadedFailed'))
+    },
+  })
+}
+
+export function RvcMarkUndownloaded({ entries, disabled }: { entries: ExportReference[]; disabled?: boolean }) {
+  const { t } = useI18n()
+  const mark = useMarkUndownloaded()
+  if (!entries.length) return null
+  return (
+    <button type="button" className="btn btn-secondary btn-sm" disabled={disabled || mark.isPending}
+      onClick={() => mark.mutate(entries)}>{t('export.markUndownloadedSelected', { count: entries.length })}</button>
+  )
+}
+
 type BundleStatus = { status: 'pending' | 'completed' | 'interrupted' | 'expired' }
 
 export function RvcBundleDownload({ entries, disabled }: { entries: ExportReference[]; disabled?: boolean }) {
@@ -107,13 +130,7 @@ export function RvcBundleDownload({ entries, disabled }: { entries: ExportRefere
     ).data,
     onSuccess: ({ download_url, status_url }) => {
       if (status_url) setTrackedDownloads(current => [...current, status_url])
-      const link = document.createElement('a')
-      link.href = API_URL + download_url
-      link.download = ''
-      link.hidden = true
-      document.body.append(link)
-      link.click()
-      link.remove()
+      downloadFile(download_url)
     },
     onError: error => {
       const detail = isAxiosError(error) ? error.response?.data?.detail : undefined
@@ -147,11 +164,7 @@ export function RvcExportList({ projectId, batches, selection, actionsDisabled }
     mutationFn: (exportId: string) => api.post(exportUrl + exportId + '/open-folder'),
     onError: () => toast.error(t('export.openFolderFailed')),
   })
-  const markUndownloaded = useMutation({
-    mutationFn: (exportId: string) => api.delete(exportUrl + exportId + '/downloaded'),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['rvc-exports'] }),
-    onError: () => toast.error(t('export.markUndownloadedFailed')),
-  })
+  const markUndownloaded = useMarkUndownloaded()
   const rename = useMutation({
     mutationFn: ({ id, name }: { id: string; name: string }) => api.patch(exportUrl + id, { batch_name: name.trim() }),
     onSuccess: async () => {
@@ -182,7 +195,8 @@ export function RvcExportList({ projectId, batches, selection, actionsDisabled }
             <a className="btn btn-secondary btn-sm" href={API_URL + batch.download_url} aria-label={t('zip.download') + ' · ' + label}>{t('zip.download')}</a>
             {batch.downloaded && (
               <button type="button" className="btn btn-secondary btn-sm" disabled={markUndownloaded.isPending || actionsDisabled}
-                aria-label={t('export.markUndownloaded') + ' · ' + label} onClick={() => markUndownloaded.mutate(batch.export_id)}>
+                aria-label={t('export.markUndownloaded') + ' · ' + label}
+                onClick={() => markUndownloaded.mutate([{ project_id: projectId, export_id: batch.export_id }])}>
                 {t('export.markUndownloaded')}
               </button>
             )}

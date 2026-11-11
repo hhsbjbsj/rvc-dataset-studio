@@ -1,5 +1,5 @@
 import { Link, useLocation } from 'react-router-dom'
-import { History, FileAudio, FolderOpen, Sun, Moon } from 'lucide-react'
+import { FileArchive, History, FileAudio, FolderOpen, Sun, Moon } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 import { BrandMark } from './BrandMark'
 import { getHealth } from '@/lib/api'
@@ -9,6 +9,7 @@ import { useColorMode } from '@/lib/theme'
 const navItems = [
   { path: '/rvc', label: 'nav.rvc', icon: FolderOpen },
   { path: '/convert', label: 'nav.convert', icon: FileAudio },
+  { path: '/zip-editor', label: 'nav.zipEditor', icon: FileArchive },
   { path: '/history', label: 'nav.history', icon: History },
 ] as const
 

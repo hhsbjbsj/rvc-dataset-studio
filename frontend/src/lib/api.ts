@@ -6,6 +6,16 @@ export const api = axios.create({
   headers: { 'Content-Type': 'application/json' },
 })
 
+export function downloadFile(downloadUrl: string) {
+  const link = document.createElement('a')
+  link.href = API_URL + downloadUrl
+  link.download = ''
+  link.hidden = true
+  document.body.append(link)
+  link.click()
+  link.remove()
+}
+
 export interface JobOptions {
   target_duration_minutes: number
   min_clip_duration_sec: number

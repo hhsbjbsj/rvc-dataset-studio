@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { isAxiosError } from 'axios'
 import { RvcAudioRangeEditor, RvcManualEditor, type AudioRange } from '@/components/RvcManualEditor'
-import { RvcBundleDownload, RvcExportFilters, RvcExportList, RvcExportSelectionError, RvcResultSelection } from '@/components/RvcExportList'
+import { RvcBundleDownload, RvcExportFilters, RvcExportList, RvcExportSelectionError, RvcMarkUndownloaded, RvcResultSelection } from '@/components/RvcExportList'
 import { RvcSources, type Project, type RunAction } from '@/components/RvcSources'
 import { api } from '@/lib/api'
 import { API_URL } from '@/lib/config'
@@ -105,6 +105,8 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
   })
   const visibleExports = visibleBatches.map(batch => ({ project_id: id, export_id: batch.export_id }))
   const selectedBatches = visibleExports.filter(entry => saved.has(id, entry.export_id))
+  const selectedDownloaded = visibleBatches.filter(batch => batch.downloaded && saved.has(id, batch.export_id))
+    .map(batch => ({ project_id: id, export_id: batch.export_id }))
   const exportSelectionDisabled = !saved.entries || saved.saving
   const bufferKey = ['rvc-merge-buffer', id]
   const buffer = useQuery({
@@ -448,6 +450,7 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
                     onChange={checked => saved.update(visibleExports, checked)} />
                 )}
                 <RvcBundleDownload entries={selectedBatches} disabled={exportSelectionDisabled} />
+                <RvcMarkUndownloaded entries={selectedDownloaded} disabled={exportSelectionDisabled} />
               </div>
             )}
             {!!visibleBatches.length && <RvcExportList projectId={id} batches={visibleBatches} selection={{

@@ -11,7 +11,7 @@ import time
 import wave
 import zipfile
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 import httpx
 import pytest
@@ -528,6 +528,15 @@ def test_download_selected_export_batches_as_one_zip(client):
     assert client.get(redownload["download_url"]).status_code == 200
     assert marked_key in downloaded_exports()
 
+    batch_reset = "/api/rvc/exports/mark-undownloaded"
+    invalid = {**selected[0], "export_id": new_id()}
+    assert client.post(batch_reset, json={"exports": [marked, invalid]}).status_code == 404
+    assert first_download <= downloaded_exports()
+    assert client.post(batch_reset, json={"exports": [marked, selected[0], marked]}).status_code == 204
+    assert downloaded_exports().isdisjoint(first_download)
+    assert second_download in downloaded_exports()
+    assert saved_selection() == [marked]
+
     post(client, "/api/rvc/history/remove", {"exports": [selected[1]]})
     assert client.post(url, json={"exports": [selected[1]]}).status_code == 404
     hidden_url = f"/api/rvc/projects/{selected[1]['project_id']}/exports/{selected[1]['export_id']}/downloaded"
@@ -536,6 +545,56 @@ def test_download_selected_export_batches_as_one_zip(client):
     with zipfile.ZipFile(folders[0] / "dataset.zip", "w") as archive:
         archive.writestr("../escaped.wav", b"invalid")
     assert client.post(url, json={"exports": [selected[0]]}).status_code == 400
+
+
+def test_edit_uploaded_zip_keeps_original_name_and_remaining_members(client):
+    original = io.BytesIO()
+    kept = zipfile.ZipInfo("第一批/保留.wav", date_time=(2025, 1, 2, 3, 4, 6))
+    kept.compress_type = zipfile.ZIP_DEFLATED
+    kept.comment = b"entry comment"
+    with zipfile.ZipFile(original, "w") as archive:
+        archive.comment = b"bundle comment"
+        archive.writestr("第一批/", b"")
+        archive.writestr(kept, b"keep this WAV exactly")
+        archive.writestr("第一批/移除.wav", b"preview these bytes")
+        archive.writestr("第二批/保留.wav", b"a different WAV with the same basename")
+        archive.writestr("metadata.json", b'{"fixture":true}')
+
+    filename = "角色 甲.zip"
+    uploads = "/api/rvc/zip-editor/uploads"
+    headers = {"X-Zip-Name": quote(filename), "Content-Type": "application/zip"}
+    response = client.post(uploads, content=original.getvalue(), headers=headers)
+    assert response.status_code == 201, response.text
+    session = response.json()
+    assert session["name"] == filename
+    assert [(entry["id"], entry["name"]) for entry in session["entries"]] == [
+        (1, "第一批/保留.wav"), (2, "第一批/移除.wav"), (3, "第二批/保留.wav"),
+    ]
+    base = f"{uploads}/{session['id']}"
+    assert client.get(base + "/audio/2").content == b"preview these bytes"
+    assert client.get(base + "/audio/4").status_code == 404
+    assert client.post(base + "/edit", json={"remove": [2, 4]}).status_code == 400
+
+    result = post(client, base + "/edit", {"remove": [2]})
+    edited = client.get(result["download_url"])
+    assert edited.status_code == 200
+    assert unquote(edited.headers["content-disposition"]).endswith(filename)
+    with zipfile.ZipFile(io.BytesIO(edited.content)) as archive:
+        assert archive.comment == b"bundle comment"
+        assert archive.namelist() == ["第一批/", "第一批/保留.wav", "第二批/保留.wav", "metadata.json"]
+        assert archive.read("第一批/保留.wav") == b"keep this WAV exactly"
+        assert archive.read("第二批/保留.wav") == b"a different WAV with the same basename"
+        assert archive.read("metadata.json") == b'{"fixture":true}'
+        saved = archive.getinfo(kept.filename)
+        assert (saved.date_time, saved.compress_type, saved.comment) == (kept.date_time, kept.compress_type, kept.comment)
+        assert archive.testzip() is None
+    assert client.get(base + "/audio/2").content == b"preview these bytes"
+
+    unsafe = io.BytesIO()
+    with zipfile.ZipFile(unsafe, "w") as archive:
+        archive.writestr("../escaped.wav", b"invalid")
+    assert client.post(uploads, content=unsafe.getvalue(), headers=headers).status_code == 400
+    assert client.post(uploads, content=original.getvalue(), headers={**headers, "Origin": "https://example.com"}).status_code == 403
 
 
 def test_rename_legacy_exports_in_history(client, monkeypatch):

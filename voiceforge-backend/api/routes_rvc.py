@@ -894,18 +894,33 @@ def download_export(project_id: Identifier, export_id: Identifier, db: DB):
         return FileResponse(archive, media_type="application/zip", filename=filename)
 
 
-@router.delete("/projects/{project_id}/exports/{export_id}/downloaded", status_code=204)
-def clear_export_download(project_id: Identifier, export_id: Identifier, db: DB):
+def clear_download_marks(db: Session, exports: list[ExportHistoryEntry]) -> Response:
+    grouped = defaultdict(set)
+    for entry in exports:
+        grouped[entry.project_id].add(entry.export_id)
     with export_history_lock:
-        get_project(db, project_id)
-        removed = db.get(RemovedHistoryEntry, ("export", project_id, export_id))
-        if removed is not None or find_export_archive(project_id, export_id) is None:
-            raise HTTPException(404, "数据集导出不存在。")
-        db.execute(delete(RvcExportDownload).where(
-            RvcExportDownload.project_id == project_id, RvcExportDownload.export_id == export_id,
-        ))
+        for project_id, ids in grouped.items():
+            get_project(db, project_id)
+            removed = db.scalars(select(RemovedHistoryEntry.item_id).where(
+                RemovedHistoryEntry.kind == "export", RemovedHistoryEntry.project_id == project_id,
+            ))
+            if not ids.isdisjoint(removed) or find_batch_archives(project_id, ids).keys() != ids:
+                raise HTTPException(404, "部分所选导出已不存在，请刷新历史记录。")
+            db.execute(delete(RvcExportDownload).where(
+                RvcExportDownload.project_id == project_id, RvcExportDownload.export_id.in_(ids),
+            ))
         db.commit()
     return Response(status_code=204)
+
+
+@router.delete("/projects/{project_id}/exports/{export_id}/downloaded", status_code=204)
+def clear_export_download(project_id: Identifier, export_id: Identifier, db: DB):
+    return clear_download_marks(db, [ExportHistoryEntry(project_id=project_id, export_id=export_id)])
+
+
+@router.post("/exports/mark-undownloaded", status_code=204)
+def mark_exports_undownloaded(data: ExportBatchList, db: DB):
+    return clear_download_marks(db, data.exports)
 
 
 def open_export_directory(folder: Path, *, create: bool = False) -> dict:
