@@ -63,6 +63,7 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
   const [page, setPage] = useState(1)
   const [selected, setSelected] = useState<string[]>([])
   const [sampleRate, setSampleRate] = useState(40000)
+  const [batchName, setBatchName] = useState('')
   const [manualClip, setManualClip] = useState<ManualClip>()
   const [trimTarget, setTrimTarget] = useState<Clip>()
   const [trimResults, setTrimResults] = useState<Clip[]>([])
@@ -185,7 +186,8 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
 
   function exportProject(clipIds?: string[]) {
     run('rvc.generate', async () => {
-      await api.post(base + '/export', { sample_rate: sampleRate, clip_ids: clipIds })
+      await api.post(base + '/export', { sample_rate: sampleRate, clip_ids: clipIds, batch_name: batchName.trim() })
+      setBatchName('')
       await queryClient.invalidateQueries({ queryKey: ['rvc-exports'] })
     })
   }
@@ -396,6 +398,10 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
             <p className="text-sm text-lo">{t('rvc.exportHelp')}</p>
             {selected.length > MAX_BATCH_SIZE && <p className="text-sm text-mid">{t('rvc.batchLimit', { count: MAX_BATCH_SIZE })}</p>}
             <div className="flex flex-wrap items-end gap-3">
+              <label className="min-w-44 flex-1 text-sm text-mid">{t('export.batchName')}
+                <input className="input-field mt-1 block w-full" value={batchName} maxLength={36} disabled={busy}
+                  placeholder={t('export.batchNameExample')} onChange={event => setBatchName(event.target.value)} />
+              </label>
               <label className="text-sm text-mid">{t('sampleRate')}
                 <select className="input-field mt-1 block" value={sampleRate} disabled={busy} onChange={e => setSampleRate(Number(e.target.value))}>
                   {RATES.map(rate => <option key={rate} value={rate}>{rate} Hz</option>)}

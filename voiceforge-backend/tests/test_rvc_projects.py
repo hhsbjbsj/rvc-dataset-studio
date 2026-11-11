@@ -260,13 +260,18 @@ def test_windows_mixed_media_review_and_export(client, speech, monkeypatch):
 
     batches = []
     filenames = set()
-    for clip in (clips[0], clips[-1]):
-        selected_output = post(client, base + "/export", {"clip_ids": [clip["id"]], "sample_rate": 40000})
+    for clip, batch_name in zip((clips[0], clips[-1]), ("角色甲", "角色乙/特别版")):
+        selected_output = post(client, base + "/export", {
+            "clip_ids": [clip["id"]], "sample_rate": 40000, "batch_name": batch_name,
+        })
         assert selected_output["count"] == 1
+        assert selected_output["batch_name"] == batch_name
         download = client.get(selected_output["download_url"])
         assert download.status_code == 200
         with zipfile.ZipFile(io.BytesIO(download.content)) as bundle:
             metadata = json.loads(bundle.read("metadata.json"))
+            assert metadata["export_id"] == selected_output["export_id"]
+            assert metadata["dataset"]["batch_name"] == batch_name
             assert [item["id"] for item in metadata["clips"]] == [clip["id"]]
             assert metadata["dataset"]["scope"] == "selected"
             assert [name for name in bundle.namelist() if name.endswith(".wav")] == ["wavs/000001.wav"]
@@ -275,7 +280,8 @@ def test_windows_mixed_media_review_and_export(client, speech, monkeypatch):
     assert len(filenames) == 2
     assert [batch["batch_number"] for batch in batches] == [1, 2]
     first_folder = Path(batches[0]["directory"]).parent
-    assert first_folder.name.startswith("第001批 [")
+    assert first_folder.name == "第001批 - 角色甲"
+    assert Path(batches[1]["directory"]).parent.name == "第002批 - 角色乙_特别版"
     assert first_folder.parent.name.startswith("测试角色 [")
     assert client.get(base).json()["review"]["pending"]["count"] == len(clips)
     assert client.post(base + "/export", json={}).status_code == 400
@@ -288,6 +294,7 @@ def test_windows_mixed_media_review_and_export(client, speech, monkeypatch):
 
     output = post(client, base + "/export", {"sample_rate": 40000})
     assert output["scope"] == "kept"
+    assert Path(output["directory"]).parent.name == "第003批"
     assert client.get(base + "/exports").json() == [
         {**batch, "batch_number": number} for number, batch in zip((3, 2, 1), (output, *reversed(batches)))
     ]
@@ -311,6 +318,10 @@ def test_windows_mixed_media_review_and_export(client, speech, monkeypatch):
     assert project_history["project"]["character"] == "测试角色"
     assert project_history["batches"] == expected_batches
     assert client.get(batches[0]["download_url"]).status_code == 200
+    removal = {"project_id": base.rsplit("/", 1)[-1], "export_id": batches[0]["export_id"]}
+    assert post(client, "/api/rvc/history/remove", {"exports": [removal]}) == {"removed": 1}
+    assert client.get(base + "/exports").json() == expected_batches[:2]
+    assert (first_folder / "dataset.zip").is_file()
 
     wavs = Path(output["directory"])
     assert len(list(wavs.glob("*.wav"))) == len(retained) == output["count"]

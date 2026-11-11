@@ -148,6 +148,7 @@ class ClearBufferInput(BaseModel):
 class ExportInput(BaseModel):
     sample_rate: SampleRate = 40000
     clip_ids: list[Identifier] | None = Field(None, min_length=1, max_length=1000)
+    batch_name: Annotated[str, StringConstraints(strip_whitespace=True, max_length=36)] = ""
 
 
 def get_project(db: Session, project_id: str) -> RvcProject:
@@ -629,7 +630,10 @@ def export_project(project_id: Identifier, data: ExportInput, db: DB):
         ]
         db.close()
         try:
-            return export_dataset(project, entries, data.sample_rate, scope="kept" if selected is None else "selected")
+            return export_dataset(
+                project, entries, data.sample_rate, scope="kept" if selected is None else "selected",
+                batch_name=data.batch_name,
+            )
         except MediaError as exc:
             raise HTTPException(400, str(exc)) from exc
 

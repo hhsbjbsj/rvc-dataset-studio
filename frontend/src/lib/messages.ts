@@ -66,6 +66,8 @@ export const messages = {
   'editor.stopLoop': ["停止循环", "Stop loop", "ループを停止"],
   'editor.trimOriginal': ["手工截取原音轨", "Trim original audio", "元の音声を手動で切り出す"],
   'export.batch': ["第 {number} 批", "Batch {number}", "バッチ {number}"],
+  'export.batchName': ["批次名称（可选）", "Batch name (optional)", "バッチ名（任意）"],
+  'export.batchNameExample': ["例如：角色甲", "For example: Character A", "例：キャラクター A"],
   'export.kept': ["已保留片段", "Kept clips", "採用クリップ"],
   'export.selected': ["所选片段", "Selected clips", "選択したクリップ"],
   'export.stats': ["{count} 段 · {duration} · {rate} Hz", "{count} clips · {duration} · {rate} Hz", "{count} 件 · {duration} · {rate} Hz"],

@@ -2,7 +2,6 @@
 
 import json
 import logging
-import os
 import re
 import shutil
 import tempfile
@@ -29,11 +28,25 @@ class SavedExport:
     batch_number: int = 0
 
 
-def _batch_folder(root: Path, export_id: str, number: int) -> Path:
+def _legacy_batch_folder(root: Path, export_id: str, number: int) -> Path:
     return root / f"第{number:03d}批 [{export_id}]"
 
 
-def _folder_id(folder: Path) -> str | None:
+def _read_manifest(folder: Path) -> dict | None:
+    try:
+        data = json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _folder_id(folder: Path, project_id: str, manifest: dict | None) -> str | None:
+    if manifest is not None and "export_id" in manifest:
+        export_id = manifest["export_id"]
+        project = manifest.get("project")
+        if isinstance(export_id, str) and LEGACY_ID.fullmatch(export_id) and isinstance(project, dict) and project.get("id") == project_id:
+            return export_id
+        return None
     match = BATCH_NAME.fullmatch(folder.name)
     return match[2] if match else folder.name if LEGACY_ID.fullmatch(folder.name) else None
 
@@ -44,18 +57,21 @@ def find_export_folder(project_id: str, export_id: str) -> Path | None:
         return None
     for archive in root.glob("*/dataset.zip"):
         folder = archive.parent
-        if _folder_id(folder) == export_id and folder.resolve() == folder and archive.is_file():
+        if folder.resolve() == folder and archive.is_file() and _folder_id(folder, project_id, _read_manifest(folder)) == export_id:
             return folder
     return None
+
+
+def _windows_folder_label(label: str) -> str:
+    safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", label).strip(" .")[:36].rstrip(" .")
+    return "_" + safe if PureWindowsPath(safe).is_reserved() else safe
 
 
 def _named_project_root(project: dict) -> Path:
     root = export_root(project["id"])
     if root.name != project["id"]:
         return root
-    character = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", project["character"]).strip(" .")[:36].rstrip(" .") or "角色"
-    if PureWindowsPath(character).is_reserved():
-        character = "_" + character
+    character = _windows_folder_label(project["character"]) or "角色"
     named = root.with_name(f"{character} [{project['id']}]")
     if root.is_dir() and root.resolve() == root and not named.exists():
         try:
@@ -76,24 +92,31 @@ def _export_result(project_id: str, batch: SavedExport) -> dict:
     }
 
 
-def _saved_exports(root: Path) -> list[SavedExport]:
+def _saved_exports(root: Path, project_id: str) -> list[SavedExport]:
     batches = []
     if root.resolve() != root:
         return batches
     for archive in root.glob("*/dataset.zip"):
         destination = archive.parent
-        export_id = _folder_id(destination)
-        if not export_id or destination.resolve() != destination or not archive.is_file():
+        if destination.resolve() != destination or not archive.is_file():
+            continue
+        manifest = _read_manifest(destination)
+        if manifest is None:
+            continue
+        export_id = _folder_id(destination, project_id, manifest)
+        if export_id is None:
             continue
         try:
-            manifest = json.loads((destination / "metadata.json").read_text(encoding="utf-8"))
             summary = manifest["dataset"]
             if not isinstance(summary["created_at"], str) or not {"count", "duration_seconds", "sample_rate"} <= summary.keys():
                 continue
-        except (OSError, ValueError, KeyError, TypeError):
+        except (KeyError, TypeError):
             continue
         match = BATCH_NAME.fullmatch(destination.name)
-        batches.append(SavedExport(destination, export_id, summary, int(match[1]) if match else 0))
+        number = summary.get("batch_number")
+        if type(number) is not int or number < 1:
+            number = int(match[1]) if match else 0
+        batches.append(SavedExport(destination, export_id, summary, number))
     batches.sort(key=lambda batch: (batch.summary["created_at"], batch.export_id))
     used = {batch.batch_number for batch in batches if batch.batch_number}
     for index, batch in enumerate(batches, 1):
@@ -108,20 +131,21 @@ def _saved_exports(root: Path) -> list[SavedExport]:
 
 def list_exports(project_id: str, removed_ids: Collection[str] = ()) -> list[dict]:
     return [
-        _export_result(project_id, batch) for batch in reversed(_saved_exports(export_root(project_id)))
+        _export_result(project_id, batch) for batch in reversed(_saved_exports(export_root(project_id), project_id))
         if batch.export_id not in removed_ids
     ]
 
 
 def migrate_export_folders(projects: list[dict]) -> None:
     for project in projects:
-        if not _saved_exports(export_root(project["id"])):
+        project_id = project["id"]
+        if not _saved_exports(export_root(project_id), project_id):
             continue
         root = _named_project_root(project)
-        for batch in _saved_exports(root):
+        for batch in _saved_exports(root, project_id):
             if batch.folder.name != batch.export_id:
                 continue
-            destination = _batch_folder(root, batch.export_id, batch.batch_number)
+            destination = _legacy_batch_folder(root, batch.export_id, batch.batch_number)
             if destination.exists():
                 continue
             try:
@@ -132,6 +156,7 @@ def migrate_export_folders(projects: list[dict]) -> None:
 
 def export_dataset(
     project: dict, entries: list[dict], sample_rate: int, *, scope: Literal["selected", "kept"],
+    batch_name: str = "",
 ) -> dict:
     if not entries:
         raise MediaError("请先试听并保留需要导出的片段。")
@@ -142,7 +167,13 @@ def export_dataset(
     seconds = sum(item["clip"]["duration"] for item in entries)
     check_space(root, int(seconds * sample_rate * 4))
     export_id = new_id()
-    number = max((batch.batch_number for batch in _saved_exports(root)), default=0) + 1
+    number = max((batch.batch_number for batch in _saved_exports(root, project["id"])), default=0) + 1
+    label = _windows_folder_label(batch_name)
+    suffix = f" - {label}" if label else ""
+    destination = root / f"第{number:03d}批{suffix}"
+    while destination.exists():
+        number += 1
+        destination = root / f"第{number:03d}批{suffix}"
 
     with tempfile.TemporaryDirectory(prefix="build-", dir=root) as temp:
         stage = Path(temp) / "dataset"
@@ -168,12 +199,15 @@ def export_dataset(
         summary = {
             "created_at": datetime.now(timezone.utc).isoformat(),
             "scope": scope,
+            "batch_number": number,
             "count": len(metadata),
             "duration_seconds": round(seconds, 3),
             "sample_rate": sample_rate, "channels": 1, "codec": "pcm_s16le",
         }
+        if batch_name:
+            summary["batch_name"] = batch_name
         manifest = {
-            "metadata.json": {"project": project, "dataset": summary, "clips": metadata},
+            "metadata.json": {"project": project, "export_id": export_id, "dataset": summary, "clips": metadata},
             "sources.json": list(sources.values()),
             "quality_report.json": {
                 **summary,
@@ -186,7 +220,6 @@ def export_dataset(
         with zipfile.ZipFile(stage / "dataset.zip", "w", compression=zipfile.ZIP_STORED) as archive:
             for path in [*wavs.iterdir(), *(stage / name for name in manifest)]:
                 archive.write(path, path.relative_to(stage).as_posix())
-        destination = _batch_folder(root, export_id, number)
-        os.replace(stage, destination)
+        stage.rename(destination)
 
     return _export_result(project["id"], SavedExport(destination, export_id, summary, number))

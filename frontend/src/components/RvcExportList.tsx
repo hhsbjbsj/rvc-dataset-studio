@@ -20,7 +20,8 @@ export function RvcExportList({ projectId, batches, selection }: { projectId: st
   return (
     <ul className="space-y-2" aria-live="polite">
       {batches.map((batch, index) => {
-        const label = t('export.batch', { number: batch.batch_number ?? batches.length - index })
+        const number = t('export.batch', { number: batch.batch_number ?? batches.length - index })
+        const label = batch.batch_name ? `${number} · ${batch.batch_name}` : number
         return (
           <li className="flex flex-wrap items-center gap-2 text-sm text-mid" key={batch.export_id}>
             {selection && (
@@ -28,7 +29,7 @@ export function RvcExportList({ projectId, batches, selection }: { projectId: st
                 checked={selection.isSelected(batch.export_id)} disabled={selection.disabled}
                 onChange={event => selection.toggle(batch.export_id, event.target.checked)} />
             )}
-            <span>{label}{batch.scope && ' · ' + t(batch.scope === 'selected' ? 'export.selected' : 'export.kept')} · {t('export.stats', { count: batch.count, duration: timestamp(batch.duration_seconds), rate: batch.sample_rate })}</span>
+            <span className="break-words">{label}{batch.scope && ' · ' + t(batch.scope === 'selected' ? 'export.selected' : 'export.kept')} · {t('export.stats', { count: batch.count, duration: timestamp(batch.duration_seconds), rate: batch.sample_rate })}</span>
             <time dateTime={batch.created_at}>{new Date(batch.created_at).toLocaleString(locale)}</time>
             <a className="btn btn-secondary btn-sm" href={API_URL + batch.download_url} aria-label={t('zip.download') + ' · ' + label}>{t('zip.download')}</a>
             <button type="button" className="btn btn-secondary btn-sm" disabled={openFolder.isPending}
