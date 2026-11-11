@@ -1,5 +1,6 @@
 """Windows FFmpeg integration and offline checks for the mixed-source workflow."""
 
+import asyncio
 import hashlib
 import io
 import json
@@ -442,6 +443,50 @@ def test_download_selected_export_batches_as_one_zip(client):
         assert bundle.testzip() is None
     assert client.get(download_url).status_code == 404
     assert all((folder / "dataset.zip").is_file() for folder in folders)
+
+    selection_url = "/api/rvc/exports/selection"
+    project_ids = {entry["project_id"] for entry in selected}
+
+    def saved_selection():
+        return [entry for entry in client.get(selection_url).json() if entry["project_id"] in project_ids]
+
+    assert client.patch(selection_url, json={"exports": selected, "selected": True}).status_code == 200
+    plain = post(client, url, {"exports": [selected[0]]})
+    assert client.get(plain["download_url"]).status_code == 200
+    assert len(saved_selection()) == 3
+    opted_in = post(client, url, {"exports": [selected[0], selected[2]], "deselect_after_download": True})
+    assert client.get(opted_in["status_url"]).json() == {"status": "pending"}
+    partial = client.get(opted_in["download_url"], headers={"Range": "bytes=0-7"})
+    assert partial.status_code == 206
+    assert client.get(opted_in["status_url"]).json() == {"status": "pending"}
+    assert len(saved_selection()) == 3
+
+    async def interrupt_download():
+        from api.routes_rvc import TrackedBundleDownload
+
+        started = asyncio.Event()
+
+        async def receive():
+            await started.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            if message["type"] == "http.response.start":
+                started.set()
+                await asyncio.Event().wait()
+
+        path = export_bundle_path(opted_in["download_url"].rsplit("/", 1)[-1])
+        await TrackedBundleDownload(path)(
+            {"type": "http", "method": "GET", "headers": [], "asgi": {"spec_version": "2.3"}}, receive, send,
+        )
+
+    asyncio.run(interrupt_download())
+    assert client.get(opted_in["status_url"]).json() == {"status": "interrupted"}
+    assert len(saved_selection()) == 3
+    download = client.get(opted_in["download_url"])
+    assert download.status_code == 200
+    assert client.get(opted_in["status_url"]).json() == {"status": "completed"}
+    assert saved_selection() == [selected[1]]
 
     post(client, "/api/rvc/history/remove", {"exports": [selected[1]]})
     assert client.post(url, json={"exports": [selected[1]]}).status_code == 404

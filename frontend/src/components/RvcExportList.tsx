@@ -1,11 +1,12 @@
 import { useI18n } from '@/lib/i18n'
-import { useState } from 'react'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useEffect, useState } from 'react'
+import { queryOptions, useIsMutating, useMutation, useQueries, useQueryClient } from '@tanstack/react-query'
 import { isAxiosError } from 'axios'
 import toast from 'react-hot-toast'
 import { api } from '@/lib/api'
 import { API_URL } from '@/lib/config'
 import { timestamp, type ExportBatch, type ExportReference } from '@/lib/rvc'
+import { exportSelectionKey } from '@/lib/useRvcExportSelection'
 
 type ExportSelection = {
   isSelected: (id: string) => boolean
@@ -64,13 +65,39 @@ export function RvcResultSelection({ count, selectedCount, onChange, disabled }:
   )
 }
 
+type BundleStatus = { status: 'pending' | 'completed' | 'interrupted' | 'expired' }
+
 export function RvcBundleDownload({ entries, disabled }: { entries: ExportReference[]; disabled?: boolean }) {
   const { t, diagnostic } = useI18n()
+  const queryClient = useQueryClient()
+  const [deselectAfterDownload, setDeselectAfterDownload] = useState(false)
+  const [trackedDownloads, setTrackedDownloads] = useState<string[]>([])
+  const savingSelection = useIsMutating({ mutationKey: exportSelectionKey }) > 0
+  const statuses = useQueries({
+    queries: trackedDownloads.map(url => queryOptions({
+      queryKey: ['rvc-bundle-status', url],
+      queryFn: async ({ signal }) => (await api.get<BundleStatus>(url, { signal })).data,
+      refetchInterval: query => query.state.data && query.state.data.status !== 'pending' ? false : 750,
+    })),
+  })
+  useEffect(() => {
+    if (savingSelection) return
+    const finished = trackedDownloads.filter((_, index) => {
+      const status = statuses[index].data?.status
+      return status && status !== 'pending'
+    })
+    if (!finished.length) return
+    setTrackedDownloads(current => current.filter(url => !finished.includes(url)))
+    if (statuses.some(result => result.data?.status === 'completed')) {
+      void queryClient.invalidateQueries({ queryKey: exportSelectionKey })
+    }
+  }, [queryClient, savingSelection, statuses, trackedDownloads])
   const bundle = useMutation({
-    mutationFn: async (exports: ExportReference[]) => (
-      await api.post<{ download_url: string }>('/api/rvc/exports/bundles', { exports })
+    mutationFn: async (data: { exports: ExportReference[]; deselect_after_download: boolean }) => (
+      await api.post<{ download_url: string; status_url?: string }>('/api/rvc/exports/bundles', data)
     ).data,
-    onSuccess: ({ download_url }) => {
+    onSuccess: ({ download_url, status_url }) => {
+      if (status_url) setTrackedDownloads(current => [...current, status_url])
       const link = document.createElement('a')
       link.href = API_URL + download_url
       link.download = ''
@@ -85,10 +112,18 @@ export function RvcBundleDownload({ entries, disabled }: { entries: ExportRefere
     },
   })
   return (
-    <button type="button" className="btn btn-primary btn-sm" disabled={disabled || !entries.length || bundle.isPending}
-      aria-busy={bundle.isPending} onClick={() => bundle.mutate(entries)}>
-      {bundle.isPending ? t('export.bundling') : t('export.bundleSelected', { count: entries.length })}
-    </button>
+    <div className="flex flex-wrap items-center gap-2">
+      <button type="button" className="btn btn-primary btn-sm" disabled={disabled || !entries.length || bundle.isPending}
+        aria-busy={bundle.isPending}
+        onClick={() => bundle.mutate({ exports: entries, deselect_after_download: deselectAfterDownload })}>
+        {bundle.isPending ? t('export.bundling') : t('export.bundleSelected', { count: entries.length })}
+      </button>
+      <label className="flex items-center gap-2 text-sm text-mid">
+        <input type="checkbox" checked={deselectAfterDownload} disabled={bundle.isPending}
+          onChange={event => setDeselectAfterDownload(event.target.checked)} />
+        {t('export.deselectAfterDownload')}
+      </label>
+    </div>
   )
 }
 

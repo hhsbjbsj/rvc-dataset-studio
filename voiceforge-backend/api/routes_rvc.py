@@ -4,6 +4,7 @@ import os
 import stat
 from collections import defaultdict
 from contextlib import ExitStack
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Annotated, Literal
@@ -14,13 +15,15 @@ from zipfile import BadZipFile, ZipFile
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, StringConstraints, model_validator
-from sqlalchemy import func, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import delete, func, select, update
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.background import BackgroundTask
+from starlette.concurrency import run_in_threadpool
+from starlette.types import Message, Receive, Scope, Send
 
 from config import rvc_export_root
-from database import Job, RemovedHistoryEntry, get_db
+from database import Job, RemovedHistoryEntry, SessionLocal, get_db
 from processing.rvc_audio import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS, MediaError, probe
 from processing.rvc_edit import (
     create_edit, create_edits, delete_buffered_clips, restore_buffer_audio, source_audio_info, source_audio_path, waveform_peaks,
@@ -31,8 +34,8 @@ from processing.rvc_export import (
 )
 from processing.rvc_import import stage_conversion
 from rvc_projects import (
-    RvcClip, RvcExportSelection, RvcMergeBuffer, RvcProject, RvcSource, RvcWorkspace, active_clip, clip_data, clip_path,
-    new_id, project_data, source_data, work_dir,
+    RvcBundleSelection, RvcClip, RvcExportSelection, RvcMergeBuffer, RvcProject, RvcSource, RvcWorkspace, active_clip,
+    clip_data, clip_path, new_id, project_data, source_data, work_dir,
 )
 from sources.rvc_online import resolve_source_url, search_bilibili_page
 from workers.rvc_worker import update_source
@@ -50,6 +53,7 @@ clip_file_lock = Lock()
 export_history_lock = Lock()
 workspace_lock = Lock()
 FINISHED_JOBS = {"done", "failed", "cancelled", "canceled"}
+BUNDLE_SELECTION_TTL = timedelta(days=1)
 
 
 def require_local(request: Request) -> None:
@@ -85,6 +89,10 @@ class HistoryRemoval(BaseModel):
 
 class ExportBatchList(BaseModel):
     exports: list[ExportHistoryEntry] = Field(min_length=1)
+
+
+class ExportBundleInput(ExportBatchList):
+    deselect_after_download: bool = False
 
 
 class ExportSelectionInput(ExportBatchList):
@@ -717,7 +725,7 @@ def update_export_selection(data: ExportSelectionInput, db: DB) -> list[ExportHi
 
 
 @router.post("/exports/bundles", status_code=201)
-def create_export_bundle(data: ExportBatchList, db: DB):
+def create_export_bundle(data: ExportBundleInput, db: DB):
     requested = dict.fromkeys((entry.project_id, entry.export_id) for entry in data.exports)
     grouped = defaultdict(set)
     for project_id, export_id in requested:
@@ -750,17 +758,83 @@ def create_export_bundle(data: ExportBatchList, db: DB):
         raise HTTPException(400, "无法读取所选批次的 ZIP。") from exc
     except OSError as exc:
         raise HTTPException(409, "无法打包所选批次，请检查导出 ZIP 和工作盘。") from exc
-    return {"download_url": f"/api/rvc/exports/bundles/{bundle.stem}"}
+    download_url = f"/api/rvc/exports/bundles/{bundle.stem}"
+    if data.deselect_after_download:
+        try:
+            cutoff = datetime.now(timezone.utc) - BUNDLE_SELECTION_TTL
+            db.execute(delete(RvcBundleSelection).where(RvcBundleSelection.created_at < cutoff))
+            db.add(RvcBundleSelection(bundle_id=bundle.stem, exports=[
+                {"project_id": project_id, "export_id": export_id} for project_id, export_id in requested
+            ]))
+            db.commit()
+        except SQLAlchemyError as exc:
+            discard_export_bundle(bundle)
+            raise HTTPException(500, "无法保存导出批次的勾选。") from exc
+        return {"download_url": download_url, "status_url": f"{download_url}/status"}
+    return {"download_url": download_url}
+
+
+def finish_bundle_download(bundle_id: str, delivered: bool) -> None:
+    with export_history_lock, SessionLocal.begin() as db:
+        bundle = db.get(RvcBundleSelection, bundle_id)
+        if bundle is None or bundle.status == "completed":
+            return
+        if delivered:
+            for entry in bundle.exports:
+                selected = db.get(RvcExportSelection, (entry["project_id"], entry["export_id"]))
+                if selected is not None:
+                    db.delete(selected)
+        bundle.status = "completed" if delivered else "interrupted"
+    if delivered:
+        discard_export_bundle(export_bundle_path(bundle_id))
+
+
+class TrackedBundleDownload(FileResponse):
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        full_response = False
+        delivered = False
+
+        async def track_send(message: Message) -> None:
+            nonlocal full_response, delivered
+            await send(message)
+            if message["type"] == "http.response.start":
+                full_response = message["status"] == 200
+            elif message["type"] == "http.response.body" and not message.get("more_body", False):
+                delivered = full_response
+
+        # Observe the final response body even on servers that offer delegated file sending.
+        extensions = {key: value for key, value in scope.get("extensions", {}).items()
+                      if key != "http.response.pathsend"}
+        try:
+            await super().__call__({**scope, "extensions": extensions}, receive, track_send)
+        finally:
+            await run_in_threadpool(finish_bundle_download, Path(self.path).stem, delivered)
+
+
+@router.get("/exports/bundles/{bundle_id}/status")
+def export_bundle_status(bundle_id: Identifier, db: DB):
+    archive_exists = export_bundle_path(bundle_id).is_file()
+    bundle = db.get(RvcBundleSelection, bundle_id)
+    cutoff = datetime.now(timezone.utc) - BUNDLE_SELECTION_TTL
+    if bundle is None or bundle.created_at.replace(tzinfo=timezone.utc) < cutoff:
+        return {"status": "expired"}
+    if bundle.status == "pending" and not archive_exists:
+        return {"status": "expired"}
+    return {"status": bundle.status}
 
 
 @router.get("/exports/bundles/{bundle_id}")
-def download_export_bundle(bundle_id: Identifier, request: Request):
+def download_export_bundle(bundle_id: Identifier, request: Request, db: DB):
     archive = export_bundle_path(bundle_id)
     if not archive.is_file() or archive.resolve() != archive:
         raise HTTPException(404, "合并下载已过期，请重新打包。")
-    cleanup = None if "range" in request.headers else BackgroundTask(discard_export_bundle, archive)
-    return FileResponse(archive, media_type="application/zip", filename="RVC-导出批次.zip",
-                        headers={"Cache-Control": "no-store"}, background=cleanup)
+    partial_request = "range" in request.headers
+    tracked = not partial_request and db.get(RvcBundleSelection, bundle_id) is not None
+    db.close()
+    response = TrackedBundleDownload if tracked else FileResponse
+    cleanup = None if tracked or partial_request else BackgroundTask(discard_export_bundle, archive)
+    return response(archive, media_type="application/zip", filename="RVC-导出批次.zip",
+                    headers={"Cache-Control": "no-store"}, background=cleanup)
 
 
 @router.post("/history/remove")

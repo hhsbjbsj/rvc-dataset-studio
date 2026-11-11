@@ -44,6 +44,15 @@ class RvcExportSelection(Base):
     export_id: Mapped[str] = mapped_column(String(32), primary_key=True)
 
 
+class RvcBundleSelection(Base):
+    __tablename__ = "rvc_bundle_selections"
+
+    bundle_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    exports: Mapped[list[dict[str, str]]] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
 class RvcSource(Base):
     __tablename__ = "rvc_sources"
     __table_args__ = (UniqueConstraint("project_id", "source_key"),)
