@@ -1,24 +1,29 @@
 """Inspect and edit uploaded ZIP files without unpacking their member paths."""
 
 import mimetypes
+import os
 import re
 import shutil
 import stat
+import tempfile
 import time
 import zipfile
 import zlib
+from contextlib import suppress
 from copy import copy
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from threading import Lock
+from typing import BinaryIO, Literal
 from urllib.parse import unquote
 
 import anyio
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from fastapi.responses import FileResponse, Response, StreamingResponse
+from pydantic import BaseModel, Field, ValidationError
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import ClientDisconnect
 
-from api.routes_rvc import Identifier, require_local
+from api.routes_rvc import Identifier, pick_paths, require_local
 from config import get_settings
 from processing.rvc_audio import AUDIO_EXTENSIONS, MediaError, check_space
 from rvc_projects import new_id
@@ -27,11 +32,21 @@ router = APIRouter(prefix="/api/rvc/zip-editor", tags=["ZIP editor"], dependenci
 CHUNK_SIZE = 1024 * 1024
 SESSION_ID = re.compile(r"[0-9a-f]{32}")
 SESSION_TTL = 24 * 60 * 60
-ZIP_ERRORS = (zipfile.BadZipFile, zipfile.LargeZipFile, RuntimeError, NotImplementedError, EOFError, zlib.error)
+ZIP_ERRORS = (zipfile.BadZipFile, zipfile.LargeZipFile, RuntimeError, UnicodeError, EOFError, zlib.error)
+overwrite_lock = Lock()
 
 
 class EditZipInput(BaseModel):
     remove: list[int] = Field(min_length=1)
+
+
+class PickZipInput(BaseModel):
+    locale: Literal["zh-CN", "en", "ja"] = "zh-CN"
+
+
+class LocalZipSource(BaseModel):
+    path: Path
+    fingerprint: tuple[int, int, int, int, int]
 
 
 def zip_editor_root() -> Path:
@@ -54,6 +69,19 @@ def cleanup_zip_sessions() -> None:
                 discard_zip_session(session)
         except OSError:
             continue
+
+
+def create_zip_session() -> Path:
+    root = zip_editor_root()
+    if root.resolve() != root:
+        raise HTTPException(409, "无法使用 ZIP 编辑工作目录。")
+    cleanup_zip_sessions()
+    session = root / new_id()
+    try:
+        session.mkdir(parents=True)
+    except OSError as exc:
+        raise HTTPException(409, "无法使用 ZIP 编辑工作目录。") from exc
+    return session
 
 
 def open_session(session_id: str) -> Path:
@@ -89,23 +117,86 @@ def list_audio(path: Path) -> list[dict]:
     return entries
 
 
+def zip_session_data(session: Path, filename: str) -> dict:
+    entries = list_audio(session / "original.zip")
+    (session / "filename.txt").write_text(filename, encoding="utf-8")
+    return {"id": session.name, "name": filename, "entries": entries}
+
+
+def zip_fingerprint(path: Path) -> tuple[int, int, int, int, int]:
+    if path.resolve(strict=True) != path:
+        raise OSError("ZIP path changed")
+    info = path.stat()
+    if not stat.S_ISREG(info.st_mode):
+        raise OSError("ZIP path is not a file")
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
+def require_unchanged(source: LocalZipSource) -> None:
+    try:
+        unchanged = zip_fingerprint(source.path) == source.fingerprint
+    except OSError:
+        unchanged = False
+    if not unchanged:
+        raise HTTPException(409, "原 ZIP 已变更，请重新打开后再覆盖。")
+
+
+@router.post("/pick-local")
+def pick_local_zip(data: PickZipInput):
+    title, label = {
+        "zh-CN": ("打开本机 ZIP", "ZIP 文件"),
+        "en": ("Open a local ZIP", "ZIP files"),
+        "ja": ("ローカル ZIP を開く", "ZIP ファイル"),
+    }[data.locale]
+    try:
+        selected = pick_paths(title, filetypes=[(label, "*.zip")])
+    except HTTPException as exc:
+        if exc.status_code == 400:
+            raise HTTPException(400, "无法打开本机 ZIP 选择对话框。") from exc
+        raise
+    if not selected:
+        return None
+    try:
+        path = Path(selected[0])
+        if not path.is_absolute():
+            raise ValueError("Expected an absolute ZIP path")
+        path = path.resolve(strict=True)
+        if path.suffix.lower() != ".zip" or path.drive.startswith("\\\\"):
+            raise ValueError("Expected a ZIP on a local disk")
+        original = LocalZipSource(path=path, fingerprint=zip_fingerprint(path))
+    except (OSError, ValueError) as exc:
+        raise HTTPException(400, "请选择本机磁盘上的 ZIP 文件。") from exc
+
+    session = create_zip_session()
+    completed = False
+    try:
+        check_space(session, path.stat().st_size)
+        shutil.copyfile(path, session / "original.zip")
+        require_unchanged(original)
+        result = zip_session_data(session, path.name)
+        (session / "source.json").write_text(original.model_dump_json(), encoding="utf-8")
+        completed = True
+        return {**result, "original_path": str(path)}
+    except MediaError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except ZIP_ERRORS as exc:
+        raise HTTPException(400, "无法读取 ZIP，请检查文件是否损坏。") from exc
+    except OSError as exc:
+        raise HTTPException(409, "无法使用 ZIP 编辑工作目录。") from exc
+    finally:
+        if not completed:
+            discard_zip_session(session)
+
+
 @router.post("/uploads", status_code=201)
 async def upload_zip(request: Request):
     filename = PureWindowsPath(unquote(request.headers.get("x-zip-name", ""))).name
     if not filename.lower().endswith(".zip") or any(ord(char) < 32 for char in filename):
         raise HTTPException(400, "请选择 ZIP 文件。")
-    root = zip_editor_root()
-    if root.resolve() != root:
-        raise HTTPException(409, "无法使用 ZIP 编辑工作目录。")
-    await run_in_threadpool(cleanup_zip_sessions)
-    session_id = new_id()
-    session = root / session_id
+    session = await run_in_threadpool(create_zip_session)
     source = session / "original.zip"
-    created = False
     completed = False
     try:
-        session.mkdir(parents=True)
-        created = True
         expected = int(request.headers.get("content-length", "0"))
         await run_in_threadpool(check_space, session, expected)
         received = 0
@@ -115,8 +206,7 @@ async def upload_zip(request: Request):
                 if chunk and received > expected:
                     await run_in_threadpool(check_space, session, len(chunk))
                 await output.write(chunk)
-        entries = await run_in_threadpool(list_audio, source)
-        (session / "filename.txt").write_text(filename, encoding="utf-8")
+        result = await run_in_threadpool(zip_session_data, session, filename)
         completed = True
     except MediaError as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -127,9 +217,9 @@ async def upload_zip(request: Request):
     except OSError as exc:
         raise HTTPException(409, "无法使用 ZIP 编辑工作目录。") from exc
     finally:
-        if created and not completed:
+        if not completed:
             await run_in_threadpool(discard_zip_session, session)
-    return {"id": session_id, "name": filename, "entries": entries}
+    return result
 
 
 def stream_audio(path: Path, index: int):
@@ -152,6 +242,22 @@ def preview_zip_audio(session_id: Identifier, index: int):
         })
 
 
+def write_edited_zip(source: Path, removed: set[int], output: BinaryIO) -> None:
+    with zipfile.ZipFile(source) as archive:
+        entries = archive.infolist()
+        if any(not 0 <= index < len(entries) or not is_audio(entries[index]) for index in removed):
+            raise HTTPException(400, "只能移除 ZIP 内的音频文件。")
+        with zipfile.ZipFile(output, "w") as edited:
+            edited.comment = archive.comment
+            for index, entry in enumerate(entries):
+                if index in removed:
+                    continue
+                saved_entry = copy(entry)
+                saved_entry.filename = entry.orig_filename
+                with archive.open(entry) as original, edited.open(saved_entry, "w") as member:
+                    shutil.copyfileobj(original, member, CHUNK_SIZE)
+
+
 @router.post("/uploads/{session_id}/edit")
 def edit_zip(session_id: Identifier, data: EditZipInput):
     session = open_session(session_id)
@@ -159,22 +265,10 @@ def edit_zip(session_id: Identifier, data: EditZipInput):
     result_id = new_id()
     stage = session / f"{result_id}.part"
     target = session / f"{result_id}.zip"
-    removed = set(data.remove)
     try:
         check_space(session, source.stat().st_size)
-        with zipfile.ZipFile(source) as archive:
-            entries = archive.infolist()
-            if any(not 0 <= index < len(entries) or not is_audio(entries[index]) for index in removed):
-                raise HTTPException(400, "只能移除 ZIP 内的音频文件。")
-            with zipfile.ZipFile(stage, "x") as edited:
-                edited.comment = archive.comment
-                for index, entry in enumerate(entries):
-                    if index in removed:
-                        continue
-                    saved_entry = copy(entry)
-                    saved_entry.filename = entry.orig_filename
-                    with archive.open(entry) as original, edited.open(saved_entry, "w") as output:
-                        shutil.copyfileobj(original, output, CHUNK_SIZE)
+        with stage.open("xb") as output:
+            write_edited_zip(source, set(data.remove), output)
         stage.rename(target)
     except MediaError as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -185,6 +279,52 @@ def edit_zip(session_id: Identifier, data: EditZipInput):
     finally:
         stage.unlink(missing_ok=True)
     return {"download_url": f"/api/rvc/zip-editor/uploads/{session_id}/edited/{result_id}"}
+
+
+def validate_zip_contents(path: Path) -> None:
+    with zipfile.ZipFile(path) as archive:
+        for entry in archive.infolist():
+            with archive.open(entry) as stream:
+                while stream.read(CHUNK_SIZE):
+                    pass
+
+
+@router.post("/uploads/{session_id}/overwrite", status_code=204)
+def overwrite_original_zip(session_id: Identifier, data: EditZipInput):
+    session = open_session(session_id)
+    source = session / "original.zip"
+    try:
+        original = LocalZipSource.model_validate_json((session / "source.json").read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise HTTPException(409, "请先用「打开本机 ZIP」选择原文件。") from exc
+    except (OSError, ValidationError) as exc:
+        raise HTTPException(409, "原 ZIP 已变更，请重新打开后再覆盖。") from exc
+    require_unchanged(original)
+
+    stage = None
+    try:
+        check_space(original.path.parent, source.stat().st_size)
+        # An atomic replacement requires the temporary ZIP to be on the original volume.
+        with tempfile.NamedTemporaryFile(dir=original.path.parent, prefix=".rvc-zip-", suffix=".tmp", delete=False) as output:
+            stage = Path(output.name)
+            write_edited_zip(source, set(data.remove), output)
+            output.flush()
+            os.fsync(output.fileno())
+        validate_zip_contents(stage)
+        with overwrite_lock:
+            require_unchanged(original)
+            os.replace(stage, original.path)
+    except MediaError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except ZIP_ERRORS as exc:
+        raise HTTPException(400, "无法读取 ZIP，请检查文件是否损坏。") from exc
+    except OSError as exc:
+        raise HTTPException(409, "无法覆盖原 ZIP，请检查文件权限和磁盘空间。") from exc
+    finally:
+        if stage is not None:
+            with suppress(OSError):
+                stage.unlink(missing_ok=True)
+    return Response(status_code=204)
 
 
 @router.get("/uploads/{session_id}/edited/{result_id}")

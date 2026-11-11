@@ -574,6 +574,7 @@ def test_edit_uploaded_zip_keeps_original_name_and_remaining_members(client):
     assert client.get(base + "/audio/2").content == b"preview these bytes"
     assert client.get(base + "/audio/4").status_code == 404
     assert client.post(base + "/edit", json={"remove": [2, 4]}).status_code == 400
+    assert client.post(base + "/overwrite", json={"remove": [2]}).status_code == 409
 
     result = post(client, base + "/edit", {"remove": [2]})
     edited = client.get(result["download_url"])
@@ -595,6 +596,68 @@ def test_edit_uploaded_zip_keeps_original_name_and_remaining_members(client):
         archive.writestr("../escaped.wav", b"invalid")
     assert client.post(uploads, content=unsafe.getvalue(), headers=headers).status_code == 400
     assert client.post(uploads, content=original.getvalue(), headers={**headers, "Origin": "https://example.com"}).status_code == 403
+
+
+def test_overwrite_picked_zip_preserves_original_on_conflict_or_failure(client, tmp_path, monkeypatch):
+    from api import routes_zip_editor as editor
+
+    original = tmp_path / "角色 甲.zip"
+    with zipfile.ZipFile(original, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.comment = b"keep this comment"
+        archive.writestr("第一批/保留.wav", b"keep these bytes")
+        archive.writestr("第一批/移除.wav", b"remove this audio")
+        archive.writestr("metadata.json", b'{"version":1}')
+    before = original.read_bytes()
+    picker = "/api/rvc/zip-editor/pick-local"
+    monkeypatch.setattr(editor, "pick_paths", lambda *args, **kwargs: [])
+    assert post(client, picker, {}) is None
+    monkeypatch.setattr(editor, "pick_paths", lambda *args, **kwargs: [str(original)])
+    session = post(client, picker, {"locale": "zh-CN"})
+    assert session["name"] == original.name and Path(session["original_path"]) == original
+    assert original.read_bytes() == before
+    overwrite = f"/api/rvc/zip-editor/uploads/{session['id']}/overwrite"
+    assert client.post(overwrite, json={"remove": [2]}).status_code == 400
+    assert original.read_bytes() == before
+
+    replace = editor.os.replace
+
+    def locked(source, destination):
+        if Path(destination) == original:
+            raise PermissionError("destination is in use")
+        return replace(source, destination)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(editor.os, "replace", locked)
+        assert client.post(overwrite, json={"remove": [1]}).status_code == 409
+    assert original.read_bytes() == before
+    assert not list(tmp_path.glob(".rvc-zip-*.tmp"))
+
+    validate = editor.validate_zip_contents
+
+    def changed_during_save(path):
+        validate(path)
+        with zipfile.ZipFile(original, "a") as archive:
+            archive.writestr("other.txt", b"external edit")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(editor, "validate_zip_contents", changed_during_save)
+        response = client.post(overwrite, json={"remove": [1]})
+        assert response.status_code == 409
+        assert response.json()["detail"] == "原 ZIP 已变更，请重新打开后再覆盖。"
+    with zipfile.ZipFile(original) as archive:
+        assert archive.read("other.txt") == b"external edit"
+        assert archive.read("第一批/移除.wav") == b"remove this audio"
+
+    fresh = post(client, picker, {})
+    assert client.post(f"/api/rvc/zip-editor/uploads/{fresh['id']}/overwrite", json={"remove": [1]}).status_code == 204
+    assert client.post(overwrite, json={"remove": [1]}).status_code == 409
+    with zipfile.ZipFile(original) as archive:
+        assert archive.namelist() == ["第一批/保留.wav", "metadata.json", "other.txt"]
+        assert archive.read("第一批/保留.wav") == b"keep these bytes"
+        assert archive.read("metadata.json") == b'{"version":1}'
+        assert archive.comment == b"keep this comment"
+        assert archive.testzip() is None
+    assert list(tmp_path.iterdir()) == [original]
 
 
 def test_rename_legacy_exports_in_history(client, monkeypatch):

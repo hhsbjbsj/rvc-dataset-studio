@@ -252,37 +252,52 @@ def project_details(project_id: Identifier, db: DB):
     }
 
 
-@router.post("/picker")
-def choose_paths(data: PickerInput):
-    import tkinter as tk
-    from tkinter import filedialog
-
+def pick_paths(title: str, *, filetypes: list[tuple[str, str]] | None = None,
+               folder: bool = False, multiple: bool = False) -> list[str]:
     if os.name != "nt":
         raise HTTPException(400, "系统文件对话框只在 Windows 上启用，请直接填写路径。")
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except ImportError as exc:
+        raise HTTPException(400, "无法打开系统文件对话框，请直接填写完整路径。") from exc
+
     if not picker_lock.acquire(blocking=False):
         raise HTTPException(409, "文件选择对话框已经打开。")
     root = None
     try:
-        folder_title, files_title, media_label, all_label = {
-            "zh-CN": ("选择包含素材的文件夹", "选择本地媒体素材", "媒体文件", "所有文件"),
-            "en": ("Choose a source folder", "Choose local media", "Media files", "All files"),
-            "ja": ("素材のフォルダーを選択", "ローカルメディアを選択", "メディアファイル", "すべてのファイル"),
-        }[data.locale]
         root = tk.Tk()
         root.withdraw()
         root.attributes("-topmost", True)
-        if data.folder:
-            selected = filedialog.askdirectory(parent=root, mustexist=True, title=folder_title)
-            return {"paths": [selected] if selected else []}
-        extensions = VIDEO_EXTENSIONS if data.kind == "local_video" else AUDIO_EXTENSIONS
-        filetypes = [(media_label, " ".join("*" + ext for ext in sorted(extensions))), (all_label, "*.*")]
-        return {"paths": list(filedialog.askopenfilenames(parent=root, title=files_title, filetypes=filetypes))}
+        if folder:
+            selected = filedialog.askdirectory(parent=root, mustexist=True, title=title)
+        elif multiple:
+            return list(filedialog.askopenfilenames(parent=root, title=title, filetypes=filetypes))
+        else:
+            selected = filedialog.askopenfilename(parent=root, title=title, filetypes=filetypes)
+        return [selected] if selected else []
     except tk.TclError as exc:
         raise HTTPException(400, "无法打开系统文件对话框，请直接填写完整路径。") from exc
     finally:
-        if root is not None:
-            root.destroy()
-        picker_lock.release()
+        try:
+            if root is not None:
+                root.destroy()
+        finally:
+            picker_lock.release()
+
+
+@router.post("/picker")
+def choose_paths(data: PickerInput):
+    folder_title, files_title, media_label, all_label = {
+        "zh-CN": ("选择包含素材的文件夹", "选择本地媒体素材", "媒体文件", "所有文件"),
+        "en": ("Choose a source folder", "Choose local media", "Media files", "All files"),
+        "ja": ("素材のフォルダーを選択", "ローカルメディアを選択", "メディアファイル", "すべてのファイル"),
+    }[data.locale]
+    if data.folder:
+        return {"paths": pick_paths(folder_title, folder=True)}
+    extensions = VIDEO_EXTENSIONS if data.kind == "local_video" else AUDIO_EXTENSIONS
+    filetypes = [(media_label, " ".join("*" + ext for ext in sorted(extensions))), (all_label, "*.*")]
+    return {"paths": pick_paths(files_title, filetypes=filetypes, multiple=True)}
 
 
 def local_paths(values: list[str], extensions: set[str], recursive: bool, errors: list[dict]):

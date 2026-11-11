@@ -1,14 +1,15 @@
 import { useRef, useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { isAxiosError } from 'axios'
-import { Download, Upload } from 'lucide-react'
+import { Download, FolderOpen, Upload } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { api, downloadFile } from '@/lib/api'
 import { API_URL } from '@/lib/config'
 import { useI18n, type MessageKey } from '@/lib/i18n'
 
 type AudioEntry = { id: number; name: string; size: number }
-type ZipUpload = { id: string; name: string; entries: AudioEntry[] }
+type ZipUpload = { id: string; name: string; entries: AudioEntry[]; original_path?: string | null }
+type ZipEdit = { id: string; remove: number[] }
 
 const uploads = '/api/rvc/zip-editor/uploads'
 
@@ -28,6 +29,15 @@ export function ZipEditorPage() {
     toast.error(typeof detail === 'string' ? diagnostic(detail) : t(fallback))
   }
 
+  function loadSession(data: ZipUpload | undefined) {
+    setSession(data)
+    setSearch('')
+    setRemoved(new Set())
+    setPreview(undefined)
+    setPreviewFailed(false)
+    setResult(undefined)
+  }
+
   const upload = useMutation({
     mutationFn: async (file: File) => (await api.post<ZipUpload>(uploads, file, {
       headers: { 'Content-Type': 'application/zip', 'X-Zip-Name': encodeURIComponent(file.name) },
@@ -35,17 +45,18 @@ export function ZipEditorPage() {
         if (event.total) setProgress(Math.round(100 * event.loaded / event.total))
       },
     })).data,
-    onSuccess: data => {
-      setSession(data)
-      setSearch('')
-      setRemoved(new Set())
-      setPreview(undefined)
-      setResult(undefined)
-    },
+    onSuccess: loadSession,
     onError: error => showError(error, 'zipEdit.uploadFailed'),
   })
+  const pickLocal = useMutation({
+    mutationFn: async () => (await api.post<ZipUpload | null>('/api/rvc/zip-editor/pick-local', { locale })).data,
+    onSuccess: data => {
+      if (data) loadSession(data)
+    },
+    onError: error => showError(error, 'zipEdit.openLocalFailed'),
+  })
   const edit = useMutation({
-    mutationFn: async ({ id, remove }: { id: string; remove: number[] }) => (
+    mutationFn: async ({ id, remove }: ZipEdit) => (
       await api.post<{ download_url: string }>(`${uploads}/${id}/edit`, { remove })
     ).data,
     onSuccess: ({ download_url }) => {
@@ -54,7 +65,16 @@ export function ZipEditorPage() {
     },
     onError: error => showError(error, 'zipEdit.saveFailed'),
   })
-  const busy = upload.isPending || edit.isPending
+  const overwrite = useMutation({
+    mutationFn: ({ id, remove }: ZipEdit) => api.post(`${uploads}/${id}/overwrite`, { remove }),
+    onSuccess: () => {
+      loadSession(undefined)
+      toast.success(t('zipEdit.overwritten'))
+    },
+    onError: error => showError(error, 'zipEdit.overwriteFailed'),
+  })
+  const busy = upload.isPending || pickLocal.isPending || edit.isPending || overwrite.isPending
+  const originalPath = session?.original_path
   const query = search.trim().normalize('NFKC').toLowerCase()
   const entries = session?.entries.filter(entry => entry.name.normalize('NFKC').toLowerCase().includes(query)) ?? []
 
@@ -64,6 +84,9 @@ export function ZipEditorPage() {
       <section className="card space-y-4" aria-label={t('zipEdit.choose')}>
         <p className="text-sm text-mid">{t('zipEdit.help')}</p>
         <div className="flex flex-wrap items-center gap-3">
+          <button type="button" className="btn btn-primary" disabled={busy} onClick={() => pickLocal.mutate()}>
+            <FolderOpen className="h-4 w-4" aria-hidden="true" /> {t('zipEdit.openLocal')}
+          </button>
           <button type="button" className="btn btn-secondary" disabled={busy} onClick={() => picker.current?.click()}>
             <Upload className="h-4 w-4" aria-hidden="true" /> {t('zipEdit.choose')}
           </button>
@@ -76,7 +99,8 @@ export function ZipEditorPage() {
                 upload.mutate(file)
               }
             }} />
-          {session && <span className="min-w-0 break-all font-medium text-hi">{session.name}</span>}
+          {session && <span className="min-w-0 break-all font-medium text-hi">{originalPath || session.name}</span>}
+          {pickLocal.isPending && <span role="status" className="text-sm text-lo">{t('zipEdit.openingLocal')}</span>}
           {upload.isPending && <span role="status" className="text-sm text-lo">
             {t('zipEdit.uploading')}{progress !== undefined && ` ${progress}%`}
           </span>}
@@ -140,6 +164,13 @@ export function ZipEditorPage() {
               onClick={() => edit.mutate({ id: session.id, remove: [...removed] })}>
               <Download className="h-4 w-4" aria-hidden="true" /> {t(edit.isPending ? 'export.bundling' : 'zipEdit.download')}
             </button>
+            {originalPath && (
+              <button type="button" className="btn btn-danger" disabled={busy || removed.size === 0} onClick={() => {
+                if (window.confirm(t('zipEdit.overwriteConfirm', { path: originalPath, count: removed.size }))) {
+                  overwrite.mutate({ id: session.id, remove: [...removed] })
+                }
+              }}>{t(overwrite.isPending ? 'zipEdit.overwriting' : 'zipEdit.overwrite')}</button>
+            )}
             {result && <a className="btn btn-secondary btn-sm" href={API_URL + result} download>{t('zipEdit.downloadAgain')}</a>}
           </div>
         </section>
