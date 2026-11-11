@@ -23,7 +23,7 @@ from processing.rvc_audio import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS, MediaError,
 from processing.rvc_edit import (
     create_edit, create_edits, delete_buffered_clips, restore_buffer_audio, source_audio_info, source_audio_path, waveform_peaks,
 )
-from processing.rvc_export import export_dataset, find_export_folder, list_exports
+from processing.rvc_export import export_dataset, find_export_archive, list_exports, rename_export
 from processing.rvc_import import stage_conversion
 from rvc_projects import (
     RvcClip, RvcMergeBuffer, RvcProject, RvcSource, RvcWorkspace, active_clip, clip_data, clip_path, new_id, project_data,
@@ -42,7 +42,7 @@ picker_lock = Lock()
 conversion_import_lock = Lock()
 # Exports must finish reading selected WAVs before a merge removes them.
 clip_file_lock = Lock()
-history_removal_lock = Lock()
+export_history_lock = Lock()
 workspace_lock = Lock()
 FINISHED_JOBS = {"done", "failed", "cancelled", "canceled"}
 
@@ -145,10 +145,17 @@ class ClearBufferInput(BaseModel):
     clip_ids: list[Identifier] = Field(min_length=1)
 
 
+BatchName = Annotated[str, StringConstraints(strip_whitespace=True, max_length=36)]
+
+
 class ExportInput(BaseModel):
     sample_rate: SampleRate = 40000
     clip_ids: list[Identifier] | None = Field(None, min_length=1, max_length=1000)
-    batch_name: Annotated[str, StringConstraints(strip_whitespace=True, max_length=36)] = ""
+    batch_name: BatchName = ""
+
+
+class ExportNameInput(BaseModel):
+    batch_name: BatchName
 
 
 def get_project(db: Session, project_id: str) -> RvcProject:
@@ -648,10 +655,11 @@ def rvc_export_history(db: DB):
         removed_by_project[project_id].add(export_id)
     db.close()
     history = []
-    for project in projects:
-        batches = list_exports(project["id"], removed_by_project[project["id"]])
-        if batches:
-            history.append({"project": project, "batches": batches})
+    with export_history_lock:
+        for project in projects:
+            batches = list_exports(project["id"], removed_by_project[project["id"]])
+            if batches:
+                history.append({"project": project, "batches": batches})
     return sorted(history, key=lambda entry: entry["batches"][0]["created_at"], reverse=True)
 
 
@@ -661,18 +669,19 @@ def export_history(project_id: Identifier, db: DB):
     removed_ids = set(db.scalars(select(RemovedHistoryEntry.item_id).where(
         RemovedHistoryEntry.kind == "export", RemovedHistoryEntry.project_id == project_id,
     )))
-    return list_exports(project_id, removed_ids)
+    with export_history_lock:
+        return list_exports(project_id, removed_ids)
 
 
 @router.post("/history/remove")
 def remove_history(data: HistoryRemoval, db: DB):
     exports = {(entry.project_id, entry.export_id) for entry in data.exports}
-    with history_removal_lock:
+    with export_history_lock:
         jobs = db.execute(select(Job.id, Job.status).where(Job.id.in_(set(data.job_ids)))).all() if data.job_ids else []
         if any(status not in FINISHED_JOBS for _, status in jobs):
             raise HTTPException(409, "运行中的任务不能从历史记录中移除。")
         for project_id, export_id in exports:
-            if find_export_folder(project_id, export_id) is None:
+            if find_export_archive(project_id, export_id) is None:
                 raise HTTPException(404, "部分所选导出已不存在，请刷新历史记录。")
         for project_id, export_id in exports:
             db.merge(RemovedHistoryEntry(kind="export", project_id=project_id, item_id=export_id))
@@ -682,13 +691,31 @@ def remove_history(data: HistoryRemoval, db: DB):
     return {"removed": len(exports) + len(jobs)}
 
 
+@router.patch("/projects/{project_id}/exports/{export_id}")
+def rename_export_batch(project_id: Identifier, export_id: Identifier, data: ExportNameInput, db: DB):
+    with clip_file_lock, export_history_lock:
+        get_project(db, project_id)
+        removed = db.get(RemovedHistoryEntry, ("export", project_id, export_id))
+        try:
+            batch = None if removed else rename_export(project_id, export_id, data.batch_name)
+        except FileExistsError as exc:
+            raise HTTPException(409, "目标文件名已存在，请使用其他批次名称。") from exc
+        except OSError as exc:
+            raise HTTPException(409, "无法重命名导出批次。请关闭正在使用该文件夹或 ZIP 的程序后重试。") from exc
+        if batch is None:
+            raise HTTPException(404, "数据集导出不存在。")
+        return batch
+
+
 @router.get("/projects/{project_id}/exports/{export_id}")
 def download_export(project_id: Identifier, export_id: Identifier, db: DB):
     get_project(db, project_id)
-    folder = find_export_folder(project_id, export_id)
-    if folder is None:
-        raise HTTPException(404, "数据集导出不存在。")
-    return FileResponse(folder / "dataset.zip", media_type="application/zip", filename=f"rvc-{project_id[:8]}-{export_id[:8]}.zip")
+    with export_history_lock:
+        archive = find_export_archive(project_id, export_id)
+        if archive is None:
+            raise HTTPException(404, "数据集导出不存在。")
+        filename = f"rvc-{project_id[:8]}-{export_id[:8]}.zip" if archive.name == "dataset.zip" else archive.name
+        return FileResponse(archive, media_type="application/zip", filename=filename)
 
 
 def open_export_directory(folder: Path, *, create: bool = False) -> dict:
@@ -711,7 +738,8 @@ def open_exports_folder():
 @router.post("/projects/{project_id}/exports/{export_id}/open-folder")
 def open_batch_folder(project_id: Identifier, export_id: Identifier, db: DB):
     get_project(db, project_id)
-    folder = find_export_folder(project_id, export_id)
-    if folder is None:
-        raise HTTPException(404, "数据集导出不存在。")
-    return open_export_directory(folder)
+    with export_history_lock:
+        archive = find_export_archive(project_id, export_id)
+        if archive is None:
+            raise HTTPException(404, "数据集导出不存在。")
+        return open_export_directory(archive.parent)

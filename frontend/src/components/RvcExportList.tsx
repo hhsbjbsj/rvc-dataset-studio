@@ -1,5 +1,7 @@
 import { useI18n } from '@/lib/i18n'
-import { useMutation } from '@tanstack/react-query'
+import { useState } from 'react'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { isAxiosError } from 'axios'
 import toast from 'react-hot-toast'
 import { api } from '@/lib/api'
 import { API_URL } from '@/lib/config'
@@ -12,10 +14,25 @@ type ExportSelection = {
 }
 
 export function RvcExportList({ projectId, batches, selection }: { projectId: string; batches: ExportBatch[]; selection?: ExportSelection }) {
-  const { t, locale } = useI18n()
+  const { t, locale, diagnostic } = useI18n()
+  const queryClient = useQueryClient()
+  const [editing, setEditing] = useState<{ id: string; name: string }>()
+  const exportUrl = `/api/rvc/projects/${projectId}/exports/`
   const openFolder = useMutation({
-    mutationFn: (exportId: string) => api.post(`/api/rvc/projects/${projectId}/exports/${exportId}/open-folder`),
+    mutationFn: (exportId: string) => api.post(exportUrl + exportId + '/open-folder'),
     onError: () => toast.error(t('export.openFolderFailed')),
+  })
+  const rename = useMutation({
+    mutationFn: ({ id, name }: { id: string; name: string }) => api.patch(exportUrl + id, { batch_name: name.trim() }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['rvc-exports'] })
+      setEditing(undefined)
+      toast.success(t('export.renamed'))
+    },
+    onError: error => {
+      const detail = isAxiosError(error) ? error.response?.data?.detail : undefined
+      toast.error(typeof detail === 'string' ? diagnostic(detail) : t('export.renameFailed'))
+    },
   })
   return (
     <ul className="space-y-2" aria-live="polite">
@@ -36,6 +53,24 @@ export function RvcExportList({ projectId, batches, selection }: { projectId: st
               aria-label={t('export.openBatchFolder', { name: label })} onClick={() => openFolder.mutate(batch.export_id)}>
               {t('export.openFolder')}
             </button>
+            {editing?.id === batch.export_id ? (
+              <form className="flex w-full flex-wrap items-center gap-2" onSubmit={event => {
+                event.preventDefault()
+                if (!rename.isPending) rename.mutate(editing)
+              }}>
+                <input className="input-field min-w-44 flex-1" aria-label={t('export.batchName')}
+                  placeholder={t('export.batchNameExample')} value={editing.name} maxLength={36}
+                  onChange={event => setEditing({ id: batch.export_id, name: event.target.value })}
+                  disabled={rename.isPending} autoFocus />
+                <button type="submit" className="btn btn-primary btn-sm" disabled={rename.isPending}>{t('export.saveName')}</button>
+                <button type="button" className="btn btn-secondary btn-sm" disabled={rename.isPending}
+                  onClick={() => setEditing(undefined)}>{t('export.cancelRename')}</button>
+              </form>
+            ) : (
+              <button type="button" className="btn btn-secondary btn-sm" disabled={rename.isPending || selection?.disabled}
+                aria-label={t('export.renameBatch', { name: label })}
+                onClick={() => setEditing({ id: batch.export_id, name: batch.batch_name ?? '' })}>{t('export.rename')}</button>
+            )}
             <p className="w-full break-all text-xs text-lo">{batch.directory}</p>
           </li>
         )

@@ -17,7 +17,8 @@ from rvc_projects import export_root, new_id
 
 logger = logging.getLogger(__name__)
 LEGACY_ID = re.compile(r"[0-9a-f]{32}")
-BATCH_NAME = re.compile(r"第([0-9]{1,9})批 \[([0-9a-f]{32})\]")
+LEGACY_BATCH = re.compile(r"第([0-9]{1,9})批 \[([0-9a-f]{32})\]")
+NAMED_BATCH = re.compile(r"第([0-9]{1,9})批(?: - .+)?")
 
 
 @dataclass
@@ -47,24 +48,44 @@ def _folder_id(folder: Path, project_id: str, manifest: dict | None) -> str | No
         if isinstance(export_id, str) and LEGACY_ID.fullmatch(export_id) and isinstance(project, dict) and project.get("id") == project_id:
             return export_id
         return None
-    match = BATCH_NAME.fullmatch(folder.name)
+    match = LEGACY_BATCH.fullmatch(folder.name)
     return match[2] if match else folder.name if LEGACY_ID.fullmatch(folder.name) else None
 
 
-def find_export_folder(project_id: str, export_id: str) -> Path | None:
-    root = export_root(project_id)
+def _batch_folders(root: Path):
     if not root.is_dir() or root.resolve() != root:
-        return None
-    for archive in root.glob("*/dataset.zip"):
-        folder = archive.parent
-        if folder.resolve() == folder and archive.is_file() and _folder_id(folder, project_id, _read_manifest(folder)) == export_id:
-            return folder
+        return
+    for folder in root.iterdir():
+        if folder.is_dir() and folder.resolve() == folder:
+            yield folder
+
+
+def _export_archive(folder: Path) -> Path | None:
+    for name in (f"{folder.name}.zip", "dataset.zip"):
+        archive = folder / name
+        if archive.is_file() and archive.resolve() == archive:
+            return archive
+    # An interrupted rename can leave the ZIP under its new name in the old folder.
+    candidates = [path for path in folder.glob("第*批*.zip")
+                  if NAMED_BATCH.fullmatch(path.stem) and path.is_file() and path.resolve() == path]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def find_export_archive(project_id: str, export_id: str) -> Path | None:
+    for folder in _batch_folders(export_root(project_id)):
+        if _folder_id(folder, project_id, _read_manifest(folder)) == export_id:
+            return _export_archive(folder)
     return None
 
 
 def _windows_folder_label(label: str) -> str:
     safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", label).strip(" .")[:36].rstrip(" .")
     return "_" + safe if PureWindowsPath(safe).is_reserved() else safe
+
+
+def _batch_folder_name(number: int, batch_name: str) -> str:
+    label = _windows_folder_label(batch_name)
+    return f"第{number:03d}批 - {label}" if label else f"第{number:03d}批"
 
 
 def _named_project_root(project: dict) -> Path:
@@ -94,17 +115,12 @@ def _export_result(project_id: str, batch: SavedExport) -> dict:
 
 def _saved_exports(root: Path, project_id: str) -> list[SavedExport]:
     batches = []
-    if root.resolve() != root:
-        return batches
-    for archive in root.glob("*/dataset.zip"):
-        destination = archive.parent
-        if destination.resolve() != destination or not archive.is_file():
-            continue
+    for destination in _batch_folders(root):
         manifest = _read_manifest(destination)
         if manifest is None:
             continue
         export_id = _folder_id(destination, project_id, manifest)
-        if export_id is None:
+        if export_id is None or _export_archive(destination) is None:
             continue
         try:
             summary = manifest["dataset"]
@@ -112,7 +128,7 @@ def _saved_exports(root: Path, project_id: str) -> list[SavedExport]:
                 continue
         except (KeyError, TypeError):
             continue
-        match = BATCH_NAME.fullmatch(destination.name)
+        match = LEGACY_BATCH.fullmatch(destination.name) or NAMED_BATCH.fullmatch(destination.name)
         number = summary.get("batch_number")
         if type(number) is not int or number < 1:
             number = int(match[1]) if match else 0
@@ -134,6 +150,67 @@ def list_exports(project_id: str, removed_ids: Collection[str] = ()) -> list[dic
         _export_result(project_id, batch) for batch in reversed(_saved_exports(export_root(project_id), project_id))
         if batch.export_id not in removed_ids
     ]
+
+
+def rename_export(project_id: str, export_id: str, batch_name: str) -> dict | None:
+    batch = next((entry for entry in _saved_exports(export_root(project_id), project_id)
+                  if entry.export_id == export_id), None)
+    if batch is None:
+        return None
+    folder = batch.folder
+    manifest = _read_manifest(folder)
+    archive = _export_archive(folder)
+    if manifest is None or archive is None:
+        return None
+
+    destination = folder.with_name(_batch_folder_name(batch.batch_number, batch_name))
+    named_archive = archive.with_name(f"{destination.name}.zip")
+    for original, target in ((folder, destination), (archive, named_archive)):
+        if target != original and (target.exists() or target.is_symlink()):
+            raise FileExistsError(target)
+
+    metadata = folder / "metadata.json"
+    if metadata.is_symlink() or metadata.resolve() != metadata:
+        raise OSError("Export metadata is not a local file")
+    with tempfile.TemporaryDirectory(prefix="rename-", dir=folder.parent) as temp:
+        pending = Path(temp) / "metadata.json"
+        if "export_id" not in manifest:
+            # Older exports identified the batch by its directory name alone.
+            project = manifest.get("project")
+            manifest["project"] = {**(project if isinstance(project, dict) else {}), "id": project_id}
+            manifest["export_id"] = export_id
+            pending.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+            pending.replace(metadata)
+
+        summary = manifest["dataset"]
+        summary["batch_number"] = batch.batch_number
+        if batch_name:
+            summary["batch_name"] = batch_name
+        else:
+            summary.pop("batch_name", None)
+        pending.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        current_folder = folder
+        current_archive = archive.name
+        try:
+            if archive.name != named_archive.name:
+                archive.rename(named_archive)
+                current_archive = named_archive.name
+            if folder.name != destination.name:
+                folder.rename(destination)
+                current_folder = destination
+            pending.replace(current_folder / metadata.name)
+        except OSError:
+            try:
+                if current_folder.name != folder.name:
+                    current_folder.rename(folder)
+                if current_archive != archive.name:
+                    archive.with_name(current_archive).rename(archive)
+            except OSError:
+                logger.exception("Could not restore RVC export batch names for %s", export_id)
+            raise
+
+    return _export_result(project_id, SavedExport(destination, export_id, summary, batch.batch_number))
 
 
 def migrate_export_folders(projects: list[dict]) -> None:
@@ -168,12 +245,10 @@ def export_dataset(
     check_space(root, int(seconds * sample_rate * 4))
     export_id = new_id()
     number = max((batch.batch_number for batch in _saved_exports(root, project["id"])), default=0) + 1
-    label = _windows_folder_label(batch_name)
-    suffix = f" - {label}" if label else ""
-    destination = root / f"第{number:03d}批{suffix}"
+    destination = root / _batch_folder_name(number, batch_name)
     while destination.exists():
         number += 1
-        destination = root / f"第{number:03d}批{suffix}"
+        destination = root / _batch_folder_name(number, batch_name)
 
     with tempfile.TemporaryDirectory(prefix="build-", dir=root) as temp:
         stage = Path(temp) / "dataset"
@@ -217,7 +292,7 @@ def export_dataset(
         }
         for name, value in manifest.items():
             (stage / name).write_text(json.dumps(value, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
-        with zipfile.ZipFile(stage / "dataset.zip", "w", compression=zipfile.ZIP_STORED) as archive:
+        with zipfile.ZipFile(stage / f"{destination.name}.zip", "w", compression=zipfile.ZIP_STORED) as archive:
             for path in [*wavs.iterdir(), *(stage / name for name in manifest)]:
                 archive.write(path, path.relative_to(stage).as_posix())
         stage.rename(destination)

@@ -10,6 +10,7 @@ import time
 import wave
 import zipfile
 from pathlib import Path
+from urllib.parse import unquote
 
 import httpx
 import pytest
@@ -321,7 +322,7 @@ def test_windows_mixed_media_review_and_export(client, speech, monkeypatch):
     removal = {"project_id": base.rsplit("/", 1)[-1], "export_id": batches[0]["export_id"]}
     assert post(client, "/api/rvc/history/remove", {"exports": [removal]}) == {"removed": 1}
     assert client.get(base + "/exports").json() == expected_batches[:2]
-    assert (first_folder / "dataset.zip").is_file()
+    assert (first_folder / f"{first_folder.name}.zip").is_file()
 
     wavs = Path(output["directory"])
     assert len(list(wavs.glob("*.wav"))) == len(retained) == output["count"]
@@ -382,6 +383,69 @@ def test_remove_selected_history_preserves_files_and_batch_numbers(client):
     assert (migrated / "wavs" / "sample.wav").read_bytes() == b"audio"
     assert client.get(download_url).content == original_zip
     assert [batch["batch_number"] for batch in client.get(base + "/exports").json()] == [3, 2]
+
+
+def test_rename_legacy_exports_in_history(client, monkeypatch):
+    base = new_project(client)
+    project_id = base.rsplit("/", 1)[-1]
+    root = export_root(project_id)
+    for number, label in enumerate(("角色甲", "角色乙"), 1):
+        export_id = new_id()
+        folder = root / f"第{number:03d}批 [{export_id}]"
+        (folder / "wavs").mkdir(parents=True)
+        (folder / "wavs" / "sample.wav").write_bytes(b"audio")
+        manifest = {"dataset": {
+            "created_at": f"2026-01-0{number}T00:00:00+00:00", "count": 1, "duration_seconds": 1, "sample_rate": 40000,
+        }}
+        (folder / "metadata.json").write_text(json.dumps(manifest), encoding="utf-8")
+        with zipfile.ZipFile(folder / "dataset.zip", "w") as archive:
+            archive.write(folder / "wavs" / "sample.wav", "wavs/sample.wav")
+
+        url = base + "/exports/" + export_id
+        original_zip = client.get(url).content
+        destination = root / f"第{number:03d}批 - {label}"
+        if number == 1:
+            destination.mkdir()
+            assert client.patch(url, json={"batch_name": label}).status_code == 409
+            destination.rmdir()
+
+            rename = Path.rename
+
+            def fail_folder_rename(path, target):
+                if path == folder:
+                    raise PermissionError("folder is open")
+                return rename(path, target)
+
+            with monkeypatch.context() as patch:
+                patch.setattr(Path, "rename", fail_folder_rename)
+                assert client.patch(url, json={"batch_name": label}).status_code == 409
+            assert (folder / "dataset.zip").read_bytes() == original_zip
+            assert "batch_name" not in client.get(base + "/exports").json()[0]
+
+        response = client.patch(url, json={"batch_name": f" {label} "})
+        assert response.status_code == 200, response.text
+        assert response.json()["export_id"] == export_id
+        assert response.json()["batch_number"] == number
+        assert response.json()["batch_name"] == label
+        assert not folder.exists()
+        assert (destination / "wavs" / "sample.wav").read_bytes() == b"audio"
+        assert (destination / f"{destination.name}.zip").read_bytes() == original_zip
+        download = client.get(url)
+        assert download.content == original_zip
+        assert unquote(download.headers["content-disposition"]).endswith(f"{destination.name}.zip")
+        assert response.json() == client.get(base + "/exports").json()[0]
+        if os.name == "nt":
+            opened = []
+            with monkeypatch.context() as patch:
+                patch.setattr(os, "startfile", opened.append)
+                assert client.post(url + "/open-folder").status_code == 200
+            assert opened == [destination]
+
+    group = next(group for group in client.get("/api/rvc/exports").json() if group["project"]["id"] == project_id)
+    assert [batch["batch_name"] for batch in group["batches"]] == ["角色乙", "角色甲"]
+    assert client.patch(url, json={"batch_name": ""}).status_code == 200
+    assert (root / "第002批" / "第002批.zip").read_bytes() == original_zip
+    assert "batch_name" not in client.get(base + "/exports").json()[0]
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg") or not shutil.which("ffprobe"), reason="Requires FFmpeg and FFprobe")
