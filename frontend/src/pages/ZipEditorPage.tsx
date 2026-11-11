@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react'
-import { useMutation } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { isAxiosError } from 'axios'
-import { Download, FolderOpen, Upload } from 'lucide-react'
+import { Download, FolderOpen, Undo2, Upload } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { api, downloadFile } from '@/lib/api'
 import { API_URL } from '@/lib/config'
@@ -10,11 +10,15 @@ import { useI18n, type MessageKey } from '@/lib/i18n'
 type AudioEntry = { id: number; name: string; size: number }
 type ZipUpload = { id: string; name: string; entries: AudioEntry[]; original_path?: string | null }
 type ZipEdit = { id: string; remove: number[] }
+type LastOverwrite = { id: string; path: string }
 
 const uploads = '/api/rvc/zip-editor/uploads'
+const lastOverwriteUrl = '/api/rvc/zip-editor/last-overwrite'
+const lastOverwriteKey = ['zip-last-overwrite']
 
 export function ZipEditorPage() {
   const { t, diagnostic, locale } = useI18n()
+  const queryClient = useQueryClient()
   const picker = useRef<HTMLInputElement>(null)
   const [session, setSession] = useState<ZipUpload>()
   const [progress, setProgress] = useState<number>()
@@ -23,6 +27,11 @@ export function ZipEditorPage() {
   const [preview, setPreview] = useState<number>()
   const [previewFailed, setPreviewFailed] = useState(false)
   const [result, setResult] = useState<string>()
+  const lastOverwrite = useQuery({
+    queryKey: lastOverwriteKey,
+    queryFn: async ({ signal }) => (await api.get<LastOverwrite | null>(lastOverwriteUrl, { signal })).data,
+    refetchOnWindowFocus: true,
+  })
 
   function showError(error: unknown, fallback: MessageKey) {
     const detail = isAxiosError(error) ? error.response?.data?.detail : undefined
@@ -67,13 +76,26 @@ export function ZipEditorPage() {
   })
   const overwrite = useMutation({
     mutationFn: ({ id, remove }: ZipEdit) => api.post(`${uploads}/${id}/overwrite`, { remove }),
-    onSuccess: () => {
+    onSuccess: async () => {
       loadSession(undefined)
       toast.success(t('zipEdit.overwritten'))
+      await queryClient.invalidateQueries({ queryKey: lastOverwriteKey })
     },
     onError: error => showError(error, 'zipEdit.overwriteFailed'),
   })
-  const busy = upload.isPending || pickLocal.isPending || edit.isPending || overwrite.isPending
+  const undo = useMutation({
+    mutationFn: ({ id }: LastOverwrite) => api.post(`${lastOverwriteUrl}/${id}/undo`),
+    onSuccess: async (_, restored) => {
+      if (session?.original_path === restored.path) loadSession(undefined)
+      toast.success(t('zipEdit.undoSucceeded'))
+      await queryClient.invalidateQueries({ queryKey: lastOverwriteKey })
+    },
+    onError: error => {
+      showError(error, 'zipEdit.undoFailed')
+      void queryClient.invalidateQueries({ queryKey: lastOverwriteKey })
+    },
+  })
+  const busy = upload.isPending || pickLocal.isPending || edit.isPending || overwrite.isPending || undo.isPending
   const originalPath = session?.original_path
   const query = search.trim().normalize('NFKC').toLowerCase()
   const entries = session?.entries.filter(entry => entry.name.normalize('NFKC').toLowerCase().includes(query)) ?? []
@@ -105,6 +127,16 @@ export function ZipEditorPage() {
             {t('zipEdit.uploading')}{progress !== undefined && ` ${progress}%`}
           </span>}
         </div>
+        {lastOverwrite.data && (
+          <div className="flex flex-wrap items-center gap-3">
+            <button type="button" className="btn btn-secondary" disabled={busy}
+              onClick={() => { if (lastOverwrite.data) undo.mutate(lastOverwrite.data) }}>
+              <Undo2 className="h-4 w-4" aria-hidden="true" /> {t(undo.isPending ? 'zipEdit.undoing' : 'zipEdit.undoOverwrite')}
+            </button>
+            <span className="min-w-0 break-all text-sm text-mid">{lastOverwrite.data.path}</span>
+          </div>
+        )}
+        {lastOverwrite.isError && <p role="alert" className="text-sm text-lo">{t('error.zipEditorUndoRead')}</p>}
       </section>
 
       {session && (

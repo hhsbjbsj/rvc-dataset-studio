@@ -660,6 +660,78 @@ def test_overwrite_picked_zip_preserves_original_on_conflict_or_failure(client, 
     assert list(tmp_path.iterdir()) == [original]
 
 
+def test_undo_last_zip_overwrite_restores_exact_bytes(client, tmp_path, monkeypatch):
+    from api import routes_zip_editor as editor
+
+    root = tmp_path / "sessions"
+    monkeypatch.setattr(editor, "zip_editor_root", lambda: root)
+    last = "/api/rvc/zip-editor/last-overwrite"
+    picker = "/api/rvc/zip-editor/pick-local"
+    assert client.get(last).json() is None
+
+    def open_zip(name):
+        original = tmp_path / name
+        with zipfile.ZipFile(original, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("wav/保留.wav", b"keep these bytes")
+            archive.writestr("wav/移除.wav", b"restore these bytes")
+            archive.comment = b"restore this exact archive"
+        monkeypatch.setattr(editor, "pick_paths", lambda *args, **kwargs: [str(original)])
+        session = post(client, picker, {})
+        return original, session["id"], original.read_bytes()
+
+    def overwrite(session_id):
+        return client.post(f"/api/rvc/zip-editor/uploads/{session_id}/overwrite", json={"remove": [1]})
+
+    first, first_id, _ = open_zip("角色 甲.zip")
+    assert client.get(last).json() is None
+    assert overwrite(first_id).status_code == 204
+    assert client.get(last).json() == {"id": first_id, "path": str(first)}
+    with zipfile.ZipFile(first, "a") as archive:
+        archive.writestr("other.txt", b"external edit")
+    external = first.read_bytes()
+    conflict = client.post(f"{last}/{first_id}/undo")
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"] == "覆盖后的 ZIP 已变更，无法撤销。"
+    assert first.read_bytes() == external
+
+    second, second_id, original_bytes = open_zip("角色 乙.zip")
+    replace = editor.os.replace
+
+    def locked(source, destination):
+        if Path(destination) == second:
+            raise PermissionError("destination is in use")
+        return replace(source, destination)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(editor.os, "replace", locked)
+        assert overwrite(second_id).status_code == 409
+    assert second.read_bytes() == original_bytes
+    assert client.get(last).json()["id"] == first_id
+
+    assert overwrite(second_id).status_code == 204
+    edited = second.read_bytes()
+    assert edited != original_bytes
+    assert client.post(f"{last}/{first_id}/undo").status_code == 409
+    old = time.time() - editor.SESSION_TTL - 60
+    editor.os.utime(root / first_id, (old, old))
+    editor.os.utime(root / second_id, (old, old))
+    editor.cleanup_zip_sessions()
+    assert not (root / first_id).exists()
+    assert (root / second_id / "original.zip").read_bytes() == original_bytes
+
+    with monkeypatch.context() as patch:
+        patch.setattr(editor.os, "replace", locked)
+        assert client.post(f"{last}/{second_id}/undo").status_code == 409
+    assert second.read_bytes() == edited
+    assert client.get(last).json() == {"id": second_id, "path": str(second)}
+    assert client.post(f"{last}/{second_id}/undo").status_code == 204
+    assert second.read_bytes() == original_bytes
+    assert first.read_bytes() == external
+    assert client.get(last).json() is None
+    assert client.post(f"{last}/{second_id}/undo").status_code == 409
+    assert not list(tmp_path.glob(".rvc-zip-*.tmp"))
+
+
 def test_rename_legacy_exports_in_history(client, monkeypatch):
     base = new_project(client)
     project_id = base.rsplit("/", 1)[-1]

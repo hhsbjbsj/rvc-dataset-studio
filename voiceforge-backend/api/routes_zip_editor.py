@@ -49,8 +49,64 @@ class LocalZipSource(BaseModel):
     fingerprint: tuple[int, int, int, int, int]
 
 
+class ZipUndo(BaseModel):
+    session_id: Identifier
+    path: Path
+    replacement: tuple[int, int, int, int]
+    backup: tuple[int, int, int, int, int]
+
+
+class ZipUndoState(BaseModel):
+    previous: ZipUndo | None = None
+    next: ZipUndo | None = None
+    stage: Path | None = None
+
+    def current(self) -> ZipUndo | None:
+        # Atomic replacement consumes the staged file. This also resolves an interrupted save.
+        return self.next if self.stage is not None and not self.stage.exists() else self.previous
+
+
 def zip_editor_root() -> Path:
     return get_settings().TEMP_DIR.resolve() / "rvc-zip-editor"
+
+
+def read_zip_undo() -> ZipUndoState:
+    try:
+        return ZipUndoState.model_validate_json((zip_editor_root() / "overwrite-undo.json").read_bytes())
+    except FileNotFoundError:
+        return ZipUndoState()
+
+
+def write_zip_undo(state: ZipUndoState) -> None:
+    root = zip_editor_root()
+    stage = root / f"undo-{new_id()}.part"
+    try:
+        with stage.open("xb") as output:
+            output.write(state.model_dump_json().encode("utf-8"))
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(stage, root / "overwrite-undo.json")
+    finally:
+        with suppress(OSError):
+            stage.unlink(missing_ok=True)
+
+
+def replace_zip(stage: Path, destination: Path, next_undo: ZipUndo | None) -> None:
+    previous = read_zip_undo().current()
+    write_zip_undo(ZipUndoState(previous=previous, next=next_undo, stage=stage))
+    try:
+        os.replace(stage, destination)
+    except OSError:
+        write_zip_undo(ZipUndoState(previous=previous))
+        raise
+
+
+def discard_staged_zip(stage: Path | None) -> None:
+    if stage is not None:
+        with suppress(OSError, ValidationError):
+            # Keep a pending file if saving the rollback record failed.
+            if read_zip_undo().stage != stage:
+                stage.unlink(missing_ok=True)
 
 
 def discard_zip_session(path: Path) -> None:
@@ -63,12 +119,17 @@ def cleanup_zip_sessions() -> None:
     if root.resolve() != root:
         return
     cutoff = time.time() - SESSION_TTL
-    for session in root.glob("*"):
+    with overwrite_lock:
         try:
-            if session.is_dir() and session.stat().st_mtime < cutoff:
-                discard_zip_session(session)
-        except OSError:
-            continue
+            undo = read_zip_undo().current()
+        except (OSError, ValidationError):
+            return
+        for session in root.glob("*"):
+            try:
+                if (undo is None or session.name != undo.session_id) and session.is_dir() and session.stat().st_mtime < cutoff:
+                    discard_zip_session(session)
+            except OSError:
+                continue
 
 
 def create_zip_session() -> Path:
@@ -139,6 +200,15 @@ def require_unchanged(source: LocalZipSource) -> None:
         unchanged = False
     if not unchanged:
         raise HTTPException(409, "原 ZIP 已变更，请重新打开后再覆盖。")
+
+
+def require_undo_unchanged(undo: ZipUndo) -> None:
+    try:
+        unchanged = zip_fingerprint(undo.path)[:4] == undo.replacement
+    except OSError:
+        unchanged = False
+    if not unchanged:
+        raise HTTPException(409, "覆盖后的 ZIP 已变更，无法撤销。")
 
 
 @router.post("/pick-local")
@@ -313,17 +383,62 @@ def overwrite_original_zip(session_id: Identifier, data: EditZipInput):
         validate_zip_contents(stage)
         with overwrite_lock:
             require_unchanged(original)
-            os.replace(stage, original.path)
+            replace_zip(stage, original.path, ZipUndo(
+                session_id=session_id, path=original.path,
+                replacement=zip_fingerprint(stage)[:4], backup=zip_fingerprint(source),
+            ))
     except MediaError as exc:
         raise HTTPException(400, str(exc)) from exc
     except ZIP_ERRORS as exc:
         raise HTTPException(400, "无法读取 ZIP，请检查文件是否损坏。") from exc
-    except OSError as exc:
+    except (OSError, ValidationError) as exc:
         raise HTTPException(409, "无法覆盖原 ZIP，请检查文件权限和磁盘空间。") from exc
     finally:
-        if stage is not None:
-            with suppress(OSError):
-                stage.unlink(missing_ok=True)
+        discard_staged_zip(stage)
+    return Response(status_code=204)
+
+
+@router.get("/last-overwrite")
+def last_zip_overwrite():
+    with overwrite_lock:
+        try:
+            undo = read_zip_undo().current()
+        except (OSError, ValidationError) as exc:
+            raise HTTPException(409, "无法读取上次 ZIP 覆盖记录。") from exc
+        if undo is None or not (zip_editor_root() / undo.session_id / "original.zip").is_file():
+            return None
+        return {"id": undo.session_id, "path": str(undo.path)}
+
+
+@router.post("/last-overwrite/{session_id}/undo", status_code=204)
+def undo_zip_overwrite(session_id: Identifier):
+    stage = None
+    try:
+        with overwrite_lock:
+            undo = read_zip_undo().current()
+            if undo is None or undo.session_id != session_id:
+                raise HTTPException(409, "上次 ZIP 覆盖记录已变更，请刷新后重试。")
+            require_undo_unchanged(undo)
+            backup = open_session(session_id) / "original.zip"
+            if zip_fingerprint(backup) != undo.backup:
+                raise HTTPException(409, "覆盖前的 ZIP 备份已变更，无法撤销。")
+            check_space(undo.path.parent, backup.stat().st_size)
+            with tempfile.NamedTemporaryFile(dir=undo.path.parent, prefix=".rvc-zip-", suffix=".tmp", delete=False) as output:
+                stage = Path(output.name)
+                with backup.open("rb") as source:
+                    shutil.copyfileobj(source, output, CHUNK_SIZE)
+                output.flush()
+                os.fsync(output.fileno())
+            if zip_fingerprint(backup) != undo.backup:
+                raise HTTPException(409, "覆盖前的 ZIP 备份已变更，无法撤销。")
+            require_undo_unchanged(undo)
+            replace_zip(stage, undo.path, None)
+    except MediaError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except (OSError, ValidationError) as exc:
+        raise HTTPException(409, "无法撤销 ZIP 覆盖，请检查文件权限和磁盘空间。") from exc
+    finally:
+        discard_staged_zip(stage)
     return Response(status_code=204)
 
 
