@@ -13,6 +13,22 @@ type ExportSelection = {
   disabled: boolean
 }
 
+export function RvcExportSearch({ value, onChange, count }: { value: string; onChange: (value: string) => void; count: number }) {
+  const { t } = useI18n()
+  return (
+    <div>
+      <label className="block max-w-sm text-sm text-mid">
+        {t('export.searchCharacter')}
+        <input type="search" className="input-field mt-1 block w-full" placeholder={t('export.batchNameExample')}
+          value={value} onChange={event => onChange(event.target.value)} />
+      </label>
+      <p role="status" className="mt-1 text-sm text-lo empty:mt-0">
+        {value.trim() && (count ? t('export.searchCount', { count }) : t('export.noSearchResults'))}
+      </p>
+    </div>
+  )
+}
+
 export function RvcExportList({ projectId, batches, selection }: { projectId: string; batches: ExportBatch[]; selection?: ExportSelection }) {
   const { t, locale, diagnostic } = useI18n()
   const queryClient = useQueryClient()

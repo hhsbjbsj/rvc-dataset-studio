@@ -6,9 +6,9 @@ import { Download, RefreshCw, Trash2, Clock, Layers, Eye, Calendar, Loader2 } fr
 import toast from 'react-hot-toast'
 import { api, getHistory } from '@/lib/api'
 import { BrandMark } from '@/components/BrandMark'
-import { RvcExportList } from '@/components/RvcExportList'
+import { RvcExportList, RvcExportSearch } from '@/components/RvcExportList'
 import type { Project } from '@/components/RvcSources'
-import type { ExportBatch } from '@/lib/rvc'
+import { filterExportBatches, type ExportBatch } from '@/lib/rvc'
 
 type RvcExportGroup = { project: Project; batches: ExportBatch[] }
 type HistorySelection = { exports: { project_id: string; export_id: string }[]; job_ids: string[] }
@@ -35,6 +35,7 @@ export function HistoryPage() {
   const { t, locale } = useI18n()
   const queryClient = useQueryClient()
   const [selected, setSelected] = useState<Set<string>>(() => new Set())
+  const [exportSearch, setExportSearch] = useState('')
   const { data: history, refetch, isLoading, isError, isFetching } = useQuery({
     queryKey: ['history'],
     queryFn: getHistory,
@@ -48,8 +49,12 @@ export function HistoryPage() {
     mutationFn: () => api.post('/api/rvc/exports/open-folder'),
     onError: () => toast.error(t('export.openFolderFailed')),
   })
+  const matchingGroups = (rvcHistory.data ?? []).map(({ project, batches }) => ({
+    project,
+    batches: filterExportBatches(batches, project.character, exportSearch),
+  })).filter(({ batches }) => batches.length > 0)
   const selection: HistorySelection = {
-    exports: (rvcHistory.data ?? []).flatMap(({ project, batches }) => batches
+    exports: matchingGroups.flatMap(({ project, batches }) => batches
       .filter(batch => selected.has(exportKey(project.id, batch.export_id)))
       .map(batch => ({ project_id: project.id, export_id: batch.export_id }))),
     job_ids: (history ?? []).filter(job => FINISHED.has(job.status) && selected.has(`job:${job.id}`)).map(job => job.id),
@@ -126,7 +131,9 @@ export function HistoryPage() {
         {rvcHistory.isPending && <p className="text-sm text-lo">{t('history.rvcLoading')}</p>}
         {rvcHistory.isError && <p role="alert" className="text-sm text-lo">{t('history.rvcError')}</p>}
         {rvcHistory.isSuccess && !rvcHistory.data.length && <p className="text-sm text-lo">{t('history.rvcEmpty')}</p>}
-        {rvcHistory.data?.map(({ project, batches }) => (
+        {!!rvcHistory.data?.length && <RvcExportSearch value={exportSearch} onChange={setExportSearch}
+          count={matchingGroups.reduce((count, group) => count + group.batches.length, 0)} />}
+        {matchingGroups.map(({ project, batches }) => (
           <article className="card space-y-3 !p-5" key={project.id}>
             <h3 className="break-all text-base font-medium text-hi">{project.character}</h3>
             <p className="break-all text-xs text-lo">{project.series} · {project.language}</p>

@@ -4,11 +4,11 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { isAxiosError } from 'axios'
 import { RvcAudioRangeEditor, RvcManualEditor, type AudioRange } from '@/components/RvcManualEditor'
-import { RvcExportList } from '@/components/RvcExportList'
+import { RvcExportList, RvcExportSearch } from '@/components/RvcExportList'
 import { RvcSources, type Project, type RunAction } from '@/components/RvcSources'
 import { api } from '@/lib/api'
 import { API_URL } from '@/lib/config'
-import { timestamp, type ExportBatch } from '@/lib/rvc'
+import { filterExportBatches, timestamp, type ExportBatch } from '@/lib/rvc'
 
 type Track = { index: number; codec: string; sample_rate: number; channels: number; language?: string; title?: string }
 type Source = {
@@ -64,6 +64,7 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
   const [selected, setSelected] = useState<string[]>([])
   const [sampleRate, setSampleRate] = useState(40000)
   const [batchName, setBatchName] = useState('')
+  const [exportSearch, setExportSearch] = useState('')
   const [manualClip, setManualClip] = useState<ManualClip>()
   const [trimTarget, setTrimTarget] = useState<Clip>()
   const [trimResults, setTrimResults] = useState<Clip[]>([])
@@ -93,6 +94,7 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
     queryFn: async () => (await api.get<ExportBatch[]>(base + '/exports')).data,
   })
   const batches = exportHistory.data ?? []
+  const matchingBatches = filterExportBatches(batches, project.character, exportSearch)
   const bufferKey = ['rvc-merge-buffer', id]
   const buffer = useQuery({
     queryKey: bufferKey,
@@ -424,7 +426,8 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
             {exportHistory.isPending && <p className="text-sm text-lo">{t('rvc.loadingExports')}</p>}
             {exportHistory.isError && <p role="alert" className="text-sm text-lo">{t('rvc.exportsFailed')}{' ' + diagnostic(message(exportHistory.error))}</p>}
             {exportHistory.isSuccess && !batches.length && <p className="text-sm text-lo">{t('rvc.noExports')}</p>}
-            {!!batches.length && <RvcExportList projectId={id} batches={batches} />}
+            {!!batches.length && <RvcExportSearch value={exportSearch} onChange={setExportSearch} count={matchingBatches.length} />}
+            {!!matchingBatches.length && <RvcExportList projectId={id} batches={matchingBatches} />}
           </div>
         </section>
         <ul className="space-y-3">
