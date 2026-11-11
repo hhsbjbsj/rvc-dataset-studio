@@ -44,6 +44,10 @@ export function HistoryPage() {
     queryKey: ['rvc-exports'],
     queryFn: async () => (await api.get<RvcExportGroup[]>('/api/rvc/exports')).data,
   })
+  const openExportRoot = useMutation({
+    mutationFn: () => api.post('/api/rvc/exports/open-folder'),
+    onError: () => toast.error(t('export.openFolderFailed')),
+  })
   const selection: HistorySelection = {
     exports: (rvcHistory.data ?? []).flatMap(({ project, batches }) => batches
       .filter(batch => selected.has(exportKey(project.id, batch.export_id)))
@@ -114,7 +118,11 @@ export function HistoryPage() {
       )}
 
       <section className="space-y-3" aria-labelledby="rvc-history-title">
-        <h2 className="text-lg font-semibold text-hi" id="rvc-history-title">{t('history.rvc')}</h2>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="text-lg font-semibold text-hi" id="rvc-history-title">{t('history.rvc')}</h2>
+          <button type="button" className="btn btn-secondary btn-sm" disabled={openExportRoot.isPending}
+            onClick={() => openExportRoot.mutate()}>{t('export.openRoot')}</button>
+        </div>
         {rvcHistory.isPending && <p className="text-sm text-lo">{t('history.rvcLoading')}</p>}
         {rvcHistory.isError && <p role="alert" className="text-sm text-lo">{t('history.rvcError')}</p>}
         {rvcHistory.isSuccess && !rvcHistory.data.length && <p className="text-sm text-lo">{t('history.rvcEmpty')}</p>}
@@ -122,7 +130,7 @@ export function HistoryPage() {
           <article className="card space-y-3 !p-5" key={project.id}>
             <h3 className="break-all text-base font-medium text-hi">{project.character}</h3>
             <p className="break-all text-xs text-lo">{project.series} · {project.language}</p>
-            <RvcExportList batches={batches} selection={{
+            <RvcExportList projectId={project.id} batches={batches} selection={{
               isSelected: id => selected.has(exportKey(project.id, id)),
               toggle: (id, checked) => toggle(exportKey(project.id, id), checked),
               disabled: remove.isPending,

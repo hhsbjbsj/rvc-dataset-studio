@@ -183,6 +183,8 @@
                                     <TextBlock x:Name="ServiceStatus" FontWeight="SemiBold" FontSize="14" TextWrapping="Wrap" />
                                 </DockPanel>
                                 <TextBlock x:Name="UpdateStatus" FontSize="12" Foreground="#BAC7E5" TextWrapping="Wrap" Margin="17,5,13,0" />
+                                <Button x:Name="OpenExportsButton" Style="{StaticResource Action}" Click="OpenExports"
+                                        HorizontalAlignment="Left" Margin="17,8,8,0" />
                                 <ProgressBar x:Name="ServiceProgress" Height="3" Margin="17,7,16,0" IsIndeterminate="True" Visibility="Collapsed"
                                              Foreground="#ACBFFF" Background="#303A58" />
                             </StackPanel>

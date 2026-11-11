@@ -16,6 +16,7 @@ import pytest
 import soundfile as sf
 from fastapi.testclient import TestClient
 
+from config import rvc_export_root
 from database import Job, SessionLocal
 from main import app
 from processing.rvc_audio import MediaError, write_clip
@@ -43,6 +44,38 @@ def post(client, url, data):
     response = client.post(url, json=data)
     assert response.status_code < 300, response.text
     return response.json()
+
+
+def test_workspace_remembers_explicitly_opened_project(client):
+    workspace = "/api/rvc/workspace"
+    before = client.get(workspace).json()
+    older = new_project(client).rsplit("/", 1)[-1]
+    newer = new_project(client).rsplit("/", 1)[-1]
+    assert client.get(workspace).json() == before
+    assert client.get("/api/rvc/projects").json()[0]["id"] == newer
+    assert client.put(workspace, json={"project_id": older}).json() == {"last_project_id": older}
+    assert client.put(workspace, json={"project_id": "0" * 32}).status_code == 404
+    assert client.get(workspace).json() == {"last_project_id": older}
+    assert client.put(workspace, json={"project_id": newer}).json() == {"last_project_id": newer}
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows File Explorer integration")
+def test_open_export_folder_uses_the_configured_location(client, monkeypatch):
+    opened = []
+    monkeypatch.setattr(os, "startfile", opened.append)
+    base = new_project(client)
+    project_id = base.rsplit("/", 1)[-1]
+    export_id = new_id()
+    root = rvc_export_root().resolve()
+    batch = root / project_id / export_id
+    batch.mkdir(parents=True)
+    (batch / "dataset.zip").write_bytes(b"export")
+    folder_url = base + "/exports/" + export_id + "/open-folder"
+    assert client.post(folder_url).json() == {"opened": True}
+    assert client.post("/api/rvc/exports/open-folder").json() == {"opened": True}
+    assert client.post(folder_url, headers={"Origin": "https://example.com"}).status_code == 403
+    assert client.post(base + "/exports/" + "0" * 32 + "/open-folder").status_code == 404
+    assert opened == [batch, root]
 
 
 def wait_for_sources(client, base):

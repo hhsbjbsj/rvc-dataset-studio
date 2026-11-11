@@ -27,6 +27,7 @@ public partial class MainWindow : Window
     private WorkbenchPage? page;
     private bool busy;
     private bool probing;
+    private bool openingExports;
     private string serviceMessage = "checkingService";
     private object[] serviceArguments = [];
 
@@ -77,6 +78,7 @@ public partial class MainWindow : Window
         UpdateButton.Content = T("checkUpdates");
         ReleaseButton.Content = T("viewUpdate");
         StopButton.Content = T("stopStudio");
+        OpenExportsButton.Content = T("openExports");
         RenderService();
         RenderUpdate();
     }
@@ -107,6 +109,7 @@ public partial class MainWindow : Window
         LaunchButton.Content = T(page is not null ? "openStudio" : workbench.NeedsSetup ? "initialize" : "launch");
         StopButton.Visibility = page?.StopInstance is not null ? Visibility.Visible : Visibility.Collapsed;
         StopButton.IsEnabled = !busy && !stopping;
+        OpenExportsButton.IsEnabled = !busy && !openingExports && workbench.HasProject;
     }
 
     private async Task ProbeAsync()
@@ -273,6 +276,28 @@ public partial class MainWindow : Window
         catch (Exception exception) when (exception is Win32Exception or IOException or UnauthorizedAccessException)
         {
             ShowMessage("logsFailed");
+        }
+    }
+
+    private async void OpenExports(object sender, RoutedEventArgs e)
+    {
+        openingExports = true;
+        RenderService();
+        try
+        {
+            string folder = await workbench.ExportDirectoryAsync(shutdown.Token);
+            if (shutdown.IsCancellationRequested) return;
+            Directory.CreateDirectory(folder);
+            Open(folder);
+        }
+        catch (Exception exception) when (exception is Win32Exception or IOException or UnauthorizedAccessException or OperationCanceledException)
+        {
+            if (!shutdown.IsCancellationRequested) ShowMessage("openExportsFailed");
+        }
+        finally
+        {
+            openingExports = false;
+            if (!shutdown.IsCancellationRequested) RenderService();
         }
     }
 

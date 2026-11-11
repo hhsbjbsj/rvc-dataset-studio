@@ -90,5 +90,7 @@ internal static class LauncherText
         ["closeRunning"] = ("关闭启动器会停止它启动的本机服务。请先保存正在编辑的内容。要继续关闭吗？", "Closing the launcher stops the local service it started. Save your work first. Close now?", "ランチャーを閉じると起動したサービスが停止します。作業を保存してから閉じてください。閉じますか？"),
         ["closeBusy"] = ("请等待当前操作完成。", "Wait for the current operation to finish.", "現在の処理が完了するまでお待ちください。"),
         ["logsFailed"] = ("无法打开日志目录。", "Could not open the log folder.", "ログフォルダーを開けませんでした。"),
+        ["openExports"] = ("打开导出目录", "Open export folder", "書き出しフォルダーを開く"),
+        ["openExportsFailed"] = ("无法打开 RVC 导出目录。", "Could not open the RVC export folder.", "RVC の書き出しフォルダーを開けませんでした。"),
     };
 }

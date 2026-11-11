@@ -7,7 +7,7 @@ from uuid import uuid4
 from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, select
 from sqlalchemy.orm import Mapped, mapped_column
 
-from config import get_settings
+from config import get_settings, rvc_export_root
 from database import Base
 
 
@@ -28,6 +28,13 @@ class RvcProject(Base):
     language: Mapped[str] = mapped_column(String(40))
     target_minutes: Mapped[float] = mapped_column(Float)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class RvcWorkspace(Base):
+    __tablename__ = "rvc_workspace"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("rvc_projects.id"))
 
 
 class RvcSource(Base):
@@ -105,4 +112,4 @@ def clip_path(clip: RvcClip) -> Path:
 
 
 def export_root(project_id: str) -> Path:
-    return get_settings().OUTPUT_DIR / "rvc" / project_id
+    return rvc_export_root() / project_id

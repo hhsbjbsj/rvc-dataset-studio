@@ -97,3 +97,7 @@ def get_settings() -> Settings:
     settings = Settings()
     settings.ensure_dirs()
     return settings
+
+
+def rvc_export_root() -> Path:
+    return get_settings().OUTPUT_DIR / "rvc"

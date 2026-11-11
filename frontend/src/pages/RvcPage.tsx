@@ -1,6 +1,6 @@
 import { useI18n, type MessageKey } from '@/lib/i18n'
 import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { isAxiosError } from 'axios'
 import { RvcAudioRangeEditor, RvcManualEditor, type AudioRange } from '@/components/RvcManualEditor'
@@ -418,7 +418,7 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
             {exportHistory.isPending && <p className="text-sm text-lo">{t('rvc.loadingExports')}</p>}
             {exportHistory.isError && <p role="alert" className="text-sm text-lo">{t('rvc.exportsFailed')}{' ' + diagnostic(message(exportHistory.error))}</p>}
             {exportHistory.isSuccess && !batches.length && <p className="text-sm text-lo">{t('rvc.noExports')}</p>}
-            {!!batches.length && <RvcExportList batches={batches} />}
+            {!!batches.length && <RvcExportList projectId={id} batches={batches} />}
           </div>
         </section>
         <ul className="space-y-3">
@@ -469,7 +469,31 @@ export function RvcPage() {
   const [target, setTarget] = useState(20)
   const [busy, setBusy] = useState<MessageKey>()
   const [error, setError] = useState('')
-  const project = projects.data?.find(item => item.id === selected) ?? projects.data?.[0]
+  const [restoreDismissed, setRestoreDismissed] = useState(false)
+  const project = projects.data?.find(item => item.id === selected)
+  const workspace = useQuery({
+    queryKey: ['rvc-workspace'],
+    queryFn: async () => (await api.get<{ last_project_id: string | null }>('/api/rvc/workspace')).data,
+    enabled: !selected && !restoreDismissed,
+  })
+  const previous = projects.data?.find(item => item.id === workspace.data?.last_project_id)
+  const restoreCandidate = !selected && !restoreDismissed && workspace.isSuccess
+    ? previous ?? projects.data?.[0] : undefined
+  const { mutate: rememberProject, isError: rememberFailed } = useMutation({
+    scope: { id: 'rvc-workspace' },
+    mutationFn: (projectId: string) => api.put('/api/rvc/workspace', { project_id: projectId }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['rvc-workspace'] }),
+  })
+  const openedProjectId = project?.id
+  useEffect(() => {
+    if (openedProjectId) rememberProject(openedProjectId)
+  }, [openedProjectId, rememberProject])
+
+  function chooseProject(id: string) {
+    setRestoreDismissed(true)
+    setParams(id ? { project: id } : {}, { replace: true })
+    setError('')
+  }
 
   const run: RunAction = (label, action) => {
     if (busy) return
@@ -483,7 +507,7 @@ export function RvcPage() {
     run('rvc.create', async () => {
       const { data } = await api.post<Project>('/api/rvc/projects', { series, character, language, target_minutes: target })
       await queryClient.invalidateQueries({ queryKey: ['rvc-projects'] })
-      setParams({ project: data.id }, { replace: true })
+      chooseProject(data.id)
       setCharacter('')
     })
   }
@@ -497,16 +521,29 @@ export function RvcPage() {
       <section className="card space-y-4 p-5" aria-labelledby="rvc-project">
         <h2 className="text-lg font-semibold text-hi" id="rvc-project">{t('rvc.projects')}</h2>
         {projects.isError && <p role="alert" className="text-sm text-lo">{diagnostic(message(projects.error))}</p>}
-        {project && (
-          <label className="block text-sm text-mid">{t('rvc.current')}
-            <select className="input-field mt-1 block w-full" value={project.id} disabled={!!busy} onChange={event => {
-              setParams({ project: event.target.value }, { replace: true })
-              setError('')
-            }}>
+        {restoreCandidate && (
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-line p-3">
+            <div className="min-w-0">
+              <p className="text-sm font-medium text-hi">{t(previous ? 'rvc.restoreQuestion' : 'rvc.openRecentQuestion')}</p>
+              <p className="break-words text-sm text-mid">{restoreCandidate.series} · {restoreCandidate.character}</p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button type="button" className="btn btn-secondary btn-sm" onClick={() => setRestoreDismissed(true)}>{t('rvc.startBlank')}</button>
+              <button type="button" className="btn btn-primary btn-sm" disabled={!!busy}
+                onClick={() => chooseProject(restoreCandidate.id)}>{t(previous ? 'rvc.restoreProject' : 'rvc.openRecentProject')}</button>
+            </div>
+          </div>
+        )}
+        {!!projects.data?.length && (
+          <label className="block text-sm text-mid">{t(project ? 'rvc.current' : 'rvc.savedProjects')}
+            <select className="input-field mt-1 block w-full" value={project?.id ?? ''} disabled={!!busy}
+              onChange={event => chooseProject(event.target.value)}>
+              <option value="">{t('rvc.chooseSavedProject')}</option>
               {projects.data?.map(item => <option key={item.id} value={item.id}>{item.series} · {item.character} · {item.language}</option>)}
             </select>
           </label>
         )}
+        {project && rememberFailed && <p role="status" className="text-sm text-lo">{t('rvc.rememberFailed')}</p>}
         <form className="flex flex-wrap items-end gap-3" onSubmit={create}>
           <label className="flex-1 text-sm text-mid">{t('rvc.series')}
             <input className="input-field mt-1 block w-full" value={series} maxLength={120} required onChange={e => setSeries(e.target.value)} />

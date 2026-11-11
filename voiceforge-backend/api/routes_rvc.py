@@ -17,6 +17,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from config import rvc_export_root
 from database import Job, RemovedHistoryEntry, get_db
 from processing.rvc_audio import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS, MediaError, probe
 from processing.rvc_edit import (
@@ -25,7 +26,7 @@ from processing.rvc_edit import (
 from processing.rvc_export import export_dataset, list_exports
 from processing.rvc_import import stage_conversion
 from rvc_projects import (
-    RvcClip, RvcMergeBuffer, RvcProject, RvcSource, active_clip, clip_data, clip_path, export_root, new_id, project_data,
+    RvcClip, RvcMergeBuffer, RvcProject, RvcSource, RvcWorkspace, active_clip, clip_data, clip_path, export_root, new_id, project_data,
     source_data, work_dir,
 )
 from sources.rvc_online import resolve_source_url, search_bilibili_page
@@ -42,6 +43,7 @@ conversion_import_lock = Lock()
 # Exports must finish reading selected WAVs before a merge removes them.
 clip_file_lock = Lock()
 history_removal_lock = Lock()
+workspace_lock = Lock()
 FINISHED_JOBS = {"done", "failed", "cancelled", "canceled"}
 
 
@@ -60,6 +62,10 @@ class ProjectInput(BaseModel):
     character: Name
     language: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=40)]
     target_minutes: float = Field(20, gt=0, le=1440)
+
+
+class WorkspaceInput(BaseModel):
+    project_id: Identifier
 
 
 class ExportHistoryEntry(BaseModel):
@@ -178,6 +184,21 @@ def add_source(db: Session, **fields) -> bool:
 @router.get("/projects")
 def projects(db: DB):
     return [project_data(row) for row in db.scalars(select(RvcProject).order_by(RvcProject.created_at.desc()))]
+
+
+@router.get("/workspace")
+def workspace(db: DB):
+    state = db.get(RvcWorkspace, 1)
+    return {"last_project_id": state.project_id if state else None}
+
+
+@router.put("/workspace")
+def remember_workspace(data: WorkspaceInput, db: DB):
+    with workspace_lock:
+        get_project(db, data.project_id)
+        db.merge(RvcWorkspace(id=1, project_id=data.project_id))
+        db.commit()
+    return {"last_project_id": data.project_id}
 
 
 @router.post("/projects", status_code=201)
@@ -664,3 +685,30 @@ def download_export(project_id: Identifier, export_id: Identifier, db: DB):
     if not path.is_file():
         raise HTTPException(404, "数据集导出不存在。")
     return FileResponse(path, media_type="application/zip", filename=f"rvc-{project_id[:8]}-{export_id[:8]}.zip")
+
+
+def open_export_directory(folder: Path, *, create: bool = False) -> dict:
+    if os.name != "nt":
+        raise HTTPException(501, "此操作需要 Windows 资源管理器。")
+    try:
+        if create:
+            folder.mkdir(parents=True, exist_ok=True)
+        os.startfile(folder)
+    except OSError as exc:
+        raise HTTPException(500, "无法打开导出文件夹。") from exc
+    return {"opened": True}
+
+
+@router.post("/exports/open-folder")
+def open_exports_folder():
+    return open_export_directory(rvc_export_root(), create=True)
+
+
+@router.post("/projects/{project_id}/exports/{export_id}/open-folder")
+def open_batch_folder(project_id: Identifier, export_id: Identifier, db: DB):
+    get_project(db, project_id)
+    expected = rvc_export_root().resolve() / project_id / export_id
+    folder = expected.resolve()
+    if folder != expected or not (folder / "dataset.zip").is_file():
+        raise HTTPException(404, "数据集导出不存在。")
+    return open_export_directory(folder)

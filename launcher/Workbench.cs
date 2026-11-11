@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
+using System.Text;
 using System.Text.Json;
 
 namespace RvcLauncher;
@@ -37,6 +38,29 @@ internal sealed class Workbench(string root, string dataDirectory)
             if (File.Exists(Path.Combine(directory.FullName, "start-rvc.ps1"))) return directory.FullName;
         }
         return AppContext.BaseDirectory;
+    }
+
+    public async Task<string> ExportDirectoryAsync(CancellationToken cancellationToken)
+    {
+        string python = Path.Combine(backend, "venv", "Scripts", "python.exe");
+        if (!File.Exists(python)) return Path.Combine(backend, "static", "outputs", "rvc");
+
+        var info = ProcessInfo(python, backend);
+        info.Environment["PYTHONIOENCODING"] = "utf-8";
+        info.StandardOutputEncoding = Encoding.UTF8;
+        info.ArgumentList.Add("-c");
+        info.ArgumentList.Add("from config import rvc_export_root; print(rvc_export_root())");
+        using var process = Process.Start(info) ?? throw new IOException("Could not read the RVC export location.");
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(8));
+        var output = process.StandardOutput.ReadToEndAsync(timeout.Token);
+        var error = process.StandardError.ReadToEndAsync(timeout.Token);
+        await process.WaitForExitAsync(timeout.Token);
+        await error;
+        string folder = (await output).TrimEnd('\r', '\n');
+        if (process.ExitCode != 0 || !Path.IsPathFullyQualified(folder))
+            throw new IOException("Could not read the configured RVC export location.");
+        return folder;
     }
 
     public async Task<WorkbenchPage?> FindPageAsync(CancellationToken cancellationToken)
