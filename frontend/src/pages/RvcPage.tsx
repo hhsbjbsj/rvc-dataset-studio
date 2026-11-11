@@ -4,11 +4,11 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { isAxiosError } from 'axios'
 import { RvcAudioRangeEditor, RvcManualEditor, type AudioRange } from '@/components/RvcManualEditor'
-import { RvcBundleDownload, RvcExportList, RvcExportSearch, RvcSelectAll } from '@/components/RvcExportList'
+import { RvcBundleDownload, RvcExportList, RvcExportSearch, RvcResultSelection } from '@/components/RvcExportList'
 import { RvcSources, type Project, type RunAction } from '@/components/RvcSources'
 import { api } from '@/lib/api'
 import { API_URL } from '@/lib/config'
-import { filterExportBatches, timestamp, type ExportBatch } from '@/lib/rvc'
+import { filterExportBatches, timestamp, updateSelection, type ExportBatch } from '@/lib/rvc'
 
 type Track = { index: number; codec: string; sample_rate: number; channels: number; language?: string; title?: string }
 type Source = {
@@ -432,21 +432,15 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
             {!!batches.length && (
               <div className="flex flex-wrap items-center gap-3">
                 <RvcExportSearch value={exportSearch} onChange={setExportSearch} count={matchingBatches.length} />
-                <RvcSelectAll disabled={matchingBatches.length === selectedBatches.length}
-                  onSelect={() => setSelectedExports(current => new Set([
-                    ...current, ...matchingBatches.map(batch => batch.export_id),
-                  ]))} />
+                <RvcResultSelection count={matchingBatches.length} selectedCount={selectedBatches.length}
+                  onChange={checked => setSelectedExports(current => updateSelection(current,
+                    matchingBatches.map(batch => batch.export_id), checked))} />
                 <RvcBundleDownload entries={selectedBatches} />
               </div>
             )}
             {!!matchingBatches.length && <RvcExportList projectId={id} batches={matchingBatches} selection={{
               isSelected: exportId => selectedExports.has(exportId),
-              toggle: (exportId, checked) => setSelectedExports(current => {
-                const next = new Set(current)
-                if (checked) next.add(exportId)
-                else next.delete(exportId)
-                return next
-              }),
+              toggle: (exportId, checked) => setSelectedExports(current => updateSelection(current, [exportId], checked)),
               disabled: false,
             }} />}
           </div>

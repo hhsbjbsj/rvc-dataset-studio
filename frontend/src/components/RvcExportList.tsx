@@ -29,12 +29,17 @@ export function RvcExportSearch({ value, onChange, count }: { value: string; onC
   )
 }
 
-export function RvcSelectAll({ onSelect, disabled }: { onSelect: () => void; disabled: boolean }) {
+export function RvcResultSelection({ count, selectedCount, onChange, disabled }: {
+  count: number; selectedCount: number; onChange: (checked: boolean) => void; disabled?: boolean
+}) {
   const { t } = useI18n()
   return (
-    <button type="button" className="btn btn-secondary btn-sm" disabled={disabled} onClick={onSelect}>
-      {t('export.selectAllResults')}
-    </button>
+    <div className="flex flex-wrap gap-2">
+      <button type="button" className="btn btn-secondary btn-sm" disabled={disabled || selectedCount === count}
+        onClick={() => onChange(true)}>{t('export.selectAllResults')}</button>
+      <button type="button" className="btn btn-secondary btn-sm" disabled={disabled || selectedCount === 0}
+        onClick={() => onChange(false)}>{t('export.deselectResults')}</button>
+    </div>
   )
 }
 

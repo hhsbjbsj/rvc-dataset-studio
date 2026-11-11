@@ -6,9 +6,9 @@ import { Download, RefreshCw, Trash2, Clock, Layers, Eye, Calendar, Loader2 } fr
 import toast from 'react-hot-toast'
 import { api, getHistory } from '@/lib/api'
 import { BrandMark } from '@/components/BrandMark'
-import { RvcBundleDownload, RvcExportList, RvcExportSearch, RvcSelectAll } from '@/components/RvcExportList'
+import { RvcBundleDownload, RvcExportList, RvcExportSearch, RvcResultSelection } from '@/components/RvcExportList'
 import type { Project } from '@/components/RvcSources'
-import { filterExportBatches, type ExportBatch, type ExportReference } from '@/lib/rvc'
+import { filterExportBatches, updateSelection, type ExportBatch, type ExportReference } from '@/lib/rvc'
 
 type RvcExportGroup = { project: Project; batches: ExportBatch[] }
 type HistorySelection = { exports: ExportReference[]; job_ids: string[] }
@@ -73,12 +73,7 @@ export function HistoryPage() {
     onError: () => toast.error(t('history.removeFailed')),
   })
 
-  const toggle = (key: string, checked: boolean) => setSelected(current => {
-    const next = new Set(current)
-    if (checked) next.add(key)
-    else next.delete(key)
-    return next
-  })
+  const toggle = (key: string, checked: boolean) => setSelected(current => updateSelection(current, [key], checked))
 
   const removeSelected = () => {
     if (selectedCount && window.confirm(t('history.removeConfirm', { count: selectedCount }))) remove.mutate(selection)
@@ -134,10 +129,9 @@ export function HistoryPage() {
         {!!rvcHistory.data?.length && (
           <div className="flex flex-wrap items-center gap-3">
             <RvcExportSearch value={exportSearch} onChange={setExportSearch} count={matchingExports.length} />
-            <RvcSelectAll disabled={remove.isPending || matchingExports.length === selection.exports.length}
-              onSelect={() => setSelected(current => new Set([
-                ...current, ...matchingExports.map(entry => exportKey(entry.project_id, entry.export_id)),
-              ]))} />
+            <RvcResultSelection count={matchingExports.length} selectedCount={selection.exports.length} disabled={remove.isPending}
+              onChange={checked => setSelected(current => updateSelection(current,
+                matchingExports.map(entry => exportKey(entry.project_id, entry.export_id)), checked))} />
             <RvcBundleDownload entries={selection.exports} disabled={remove.isPending} />
           </div>
         )}

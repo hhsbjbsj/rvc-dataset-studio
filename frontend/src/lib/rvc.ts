@@ -5,6 +5,15 @@ export type ExportBatch = {
 
 export type ExportReference = { project_id: string; export_id: string }
 
+export function updateSelection(selected: ReadonlySet<string>, keys: Iterable<string>, checked: boolean) {
+  const next = new Set(selected)
+  for (const key of keys) {
+    if (checked) next.add(key)
+    else next.delete(key)
+  }
+  return next
+}
+
 export function filterExportBatches(batches: ExportBatch[], projectCharacter: string, search: string) {
   const query = search.trim().normalize('NFKC').toLowerCase()
   if (!query) return batches
