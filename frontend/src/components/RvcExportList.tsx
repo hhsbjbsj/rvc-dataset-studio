@@ -14,9 +14,11 @@ type ExportSelection = {
   disabled: boolean
 }
 
-export function RvcExportFilters({ value, onChange, count, selectedOnly, onSelectedOnlyChange, selectionReady }: {
+export function RvcExportFilters({ value, onChange, count, selectedOnly, onSelectedOnlyChange, selectionReady,
+  notDownloadedOnly, onNotDownloadedOnlyChange }: {
   value: string; onChange: (value: string) => void; count: number
   selectedOnly: boolean; onSelectedOnlyChange: (value: boolean) => void; selectionReady: boolean
+  notDownloadedOnly: boolean; onNotDownloadedOnlyChange: (value: boolean) => void
 }) {
   const { t } = useI18n()
   return (
@@ -29,14 +31,20 @@ export function RvcExportFilters({ value, onChange, count, selectedOnly, onSelec
               value={value} onChange={event => onChange(event.target.value)} />
           </label>
           <p role="status" className="mt-1 text-sm text-lo empty:mt-0">
-            {value.trim() && (count ? t('export.searchCount', { count }) : t('export.noSearchResults'))}
+            {(value.trim() || notDownloadedOnly) && (count ? t('export.searchCount', { count })
+              : t(notDownloadedOnly ? 'export.noUndownloadedBatches' : 'export.noSearchResults'))}
           </p>
         </div>
       )}
       <button type="button" className={`btn btn-sm ${selectedOnly ? 'btn-primary' : 'btn-secondary'}`}
         aria-pressed={selectedOnly} disabled={!selectedOnly && !selectionReady}
         onClick={() => onSelectedOnlyChange(!selectedOnly)}>{t('export.selectedOnly')}</button>
-      {selectedOnly && count === 0 && <p role="status" className="text-sm text-lo">{t('export.noSelectedBatches')}</p>}
+      <button type="button" className={`btn btn-sm ${notDownloadedOnly ? 'btn-primary' : 'btn-secondary'}`}
+        aria-pressed={notDownloadedOnly}
+        onClick={() => onNotDownloadedOnlyChange(!notDownloadedOnly)}>{t('export.notDownloadedOnly')}</button>
+      {selectedOnly && count === 0 && (
+        <p role="status" className="text-sm text-lo">{t(notDownloadedOnly ? 'export.noUndownloadedBatches' : 'export.noSelectedBatches')}</p>
+      )}
     </div>
   )
 }

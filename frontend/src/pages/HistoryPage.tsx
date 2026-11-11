@@ -38,6 +38,7 @@ export function HistoryPage() {
   const saved = useRvcExportSelection()
   const [exportSearch, setExportSearch] = useState('')
   const [selectedOnly, setSelectedOnly] = useState(false)
+  const [notDownloadedOnly, setNotDownloadedOnly] = useState(false)
   const { data: history, refetch, isLoading, isError, isFetching } = useQuery({
     queryKey: ['history'],
     queryFn: getHistory,
@@ -53,8 +54,11 @@ export function HistoryPage() {
   })
   const visibleGroups = (rvcHistory.data ?? []).map(({ project, batches }) => ({
     project,
-    batches: filterExportBatches(batches, project.character, selectedOnly ? '' : exportSearch,
-      selectedOnly ? exportId => saved.has(project.id, exportId) : undefined),
+    batches: filterExportBatches(batches, project.character, {
+      search: selectedOnly ? '' : exportSearch,
+      includesExport: selectedOnly ? exportId => saved.has(project.id, exportId) : undefined,
+      notDownloadedOnly,
+    }),
   })).filter(({ batches }) => batches.length > 0)
   const visibleExports = visibleGroups.flatMap(({ project, batches }) => batches
     .map(batch => ({ project_id: project.id, export_id: batch.export_id })))
@@ -138,7 +142,8 @@ export function HistoryPage() {
         {!!rvcHistory.data?.length && (
           <div className="flex flex-wrap items-center gap-3">
             <RvcExportFilters value={exportSearch} onChange={setExportSearch} count={visibleExports.length}
-              selectedOnly={selectedOnly} onSelectedOnlyChange={setSelectedOnly} selectionReady={!!saved.entries} />
+              selectedOnly={selectedOnly} onSelectedOnlyChange={setSelectedOnly} selectionReady={!!saved.entries}
+              notDownloadedOnly={notDownloadedOnly} onNotDownloadedOnlyChange={setNotDownloadedOnly} />
             {!selectedOnly && (
               <RvcResultSelection count={visibleExports.length} selectedCount={selection.exports.length} disabled={exportSelectionDisabled}
                 onChange={checked => saved.update(visibleExports, checked)} />

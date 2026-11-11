@@ -16,11 +16,15 @@ export function updateSelection(selected: ReadonlySet<string>, keys: Iterable<st
 }
 
 export function filterExportBatches(
-  batches: ExportBatch[], projectCharacter: string, search: string, includesExport?: (id: string) => boolean,
+  batches: ExportBatch[], projectCharacter: string,
+  { search, includesExport, notDownloadedOnly }: {
+    search: string; includesExport?: (id: string) => boolean; notDownloadedOnly: boolean
+  },
 ) {
   const query = search.trim().normalize('NFKC').toLowerCase()
-  if (!query && !includesExport) return batches
+  if (!query && !includesExport && !notDownloadedOnly) return batches
   return batches.flatMap((batch, index) => {
+    if (notDownloadedOnly && batch.downloaded) return []
     if (includesExport && !includesExport(batch.export_id)) return []
     const name = batch.batch_name?.trim() || projectCharacter
     if (query && !name.normalize('NFKC').toLowerCase().includes(query)) return []

@@ -67,6 +67,7 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
   const [batchName, setBatchName] = useState('')
   const [exportSearch, setExportSearch] = useState('')
   const [selectedOnly, setSelectedOnly] = useState(false)
+  const [notDownloadedOnly, setNotDownloadedOnly] = useState(false)
   const saved = useRvcExportSelection()
   const [manualClip, setManualClip] = useState<ManualClip>()
   const [trimTarget, setTrimTarget] = useState<Clip>()
@@ -97,8 +98,11 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
     queryFn: async () => (await api.get<ExportBatch[]>(base + '/exports')).data,
   })
   const batches = exportHistory.data ?? []
-  const visibleBatches = filterExportBatches(batches, project.character, selectedOnly ? '' : exportSearch,
-    selectedOnly ? exportId => saved.has(id, exportId) : undefined)
+  const visibleBatches = filterExportBatches(batches, project.character, {
+    search: selectedOnly ? '' : exportSearch,
+    includesExport: selectedOnly ? exportId => saved.has(id, exportId) : undefined,
+    notDownloadedOnly,
+  })
   const visibleExports = visibleBatches.map(batch => ({ project_id: id, export_id: batch.export_id }))
   const selectedBatches = visibleExports.filter(entry => saved.has(id, entry.export_id))
   const exportSelectionDisabled = !saved.entries || saved.saving
@@ -437,7 +441,8 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
             {!!batches.length && (
               <div className="flex flex-wrap items-center gap-3">
                 <RvcExportFilters value={exportSearch} onChange={setExportSearch} count={visibleBatches.length}
-                  selectedOnly={selectedOnly} onSelectedOnlyChange={setSelectedOnly} selectionReady={!!saved.entries} />
+                  selectedOnly={selectedOnly} onSelectedOnlyChange={setSelectedOnly} selectionReady={!!saved.entries}
+                  notDownloadedOnly={notDownloadedOnly} onNotDownloadedOnlyChange={setNotDownloadedOnly} />
                 {!selectedOnly && (
                   <RvcResultSelection count={visibleExports.length} selectedCount={selectedBatches.length} disabled={exportSelectionDisabled}
                     onChange={checked => saved.update(visibleExports, checked)} />
