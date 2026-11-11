@@ -515,8 +515,24 @@ def test_download_selected_export_batches_as_one_zip(client):
     assert client.patch(rename_url, json={"batch_name": "新的批次名"}).status_code == 200
     assert first_download <= downloaded_exports()
 
+    original_zip = client.get(rename_url).content
+    assert client.delete(rename_url + "/downloaded").status_code == 204
+    assert client.delete(rename_url + "/downloaded").status_code == 204
+    marked_key = (marked["project_id"], marked["export_id"])
+    assert marked_key not in downloaded_exports()
+    assert (first_download - {marked_key}) | {second_download} <= downloaded_exports()
+    assert not client.get(rename_url.rsplit("/", 1)[0]).json()[0].get("downloaded", False)
+    assert saved_selection() == [marked]
+    assert client.get(rename_url).content == original_zip
+    redownload = post(client, url, {"exports": [marked]})
+    assert client.get(redownload["download_url"]).status_code == 200
+    assert marked_key in downloaded_exports()
+
     post(client, "/api/rvc/history/remove", {"exports": [selected[1]]})
     assert client.post(url, json={"exports": [selected[1]]}).status_code == 404
+    hidden_url = f"/api/rvc/projects/{selected[1]['project_id']}/exports/{selected[1]['export_id']}/downloaded"
+    assert client.delete(hidden_url).status_code == 404
+    assert client.delete(f"{project_history_url}/{new_id()}/downloaded").status_code == 404
     with zipfile.ZipFile(folders[0] / "dataset.zip", "w") as archive:
         archive.writestr("../escaped.wav", b"invalid")
     assert client.post(url, json={"exports": [selected[0]]}).status_code == 400

@@ -147,6 +147,11 @@ export function RvcExportList({ projectId, batches, selection, actionsDisabled }
     mutationFn: (exportId: string) => api.post(exportUrl + exportId + '/open-folder'),
     onError: () => toast.error(t('export.openFolderFailed')),
   })
+  const markUndownloaded = useMutation({
+    mutationFn: (exportId: string) => api.delete(exportUrl + exportId + '/downloaded'),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['rvc-exports'] }),
+    onError: () => toast.error(t('export.markUndownloadedFailed')),
+  })
   const rename = useMutation({
     mutationFn: ({ id, name }: { id: string; name: string }) => api.patch(exportUrl + id, { batch_name: name.trim() }),
     onSuccess: async () => {
@@ -175,6 +180,12 @@ export function RvcExportList({ projectId, batches, selection, actionsDisabled }
             {batch.downloaded && <span className="badge badge-ok">{t('export.downloaded')}</span>}
             <time dateTime={batch.created_at}>{new Date(batch.created_at).toLocaleString(locale)}</time>
             <a className="btn btn-secondary btn-sm" href={API_URL + batch.download_url} aria-label={t('zip.download') + ' · ' + label}>{t('zip.download')}</a>
+            {batch.downloaded && (
+              <button type="button" className="btn btn-secondary btn-sm" disabled={markUndownloaded.isPending || actionsDisabled}
+                aria-label={t('export.markUndownloaded') + ' · ' + label} onClick={() => markUndownloaded.mutate(batch.export_id)}>
+                {t('export.markUndownloaded')}
+              </button>
+            )}
             <button type="button" className="btn btn-secondary btn-sm" disabled={openFolder.isPending}
               aria-label={t('export.openBatchFolder', { name: label })} onClick={() => openFolder.mutate(batch.export_id)}>
               {t('export.openFolder')}

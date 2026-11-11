@@ -82,6 +82,8 @@ export const messages = {
   'export.bundleSelected': ["打包所选批次（{count}）", "Download selected batches ({count})", "選択したバッチをまとめて保存（{count}）"],
   'export.deselectAfterDownload': ["下载后取消本次勾选", "Deselect these batches after download", "ダウンロード後に今回の選択を解除"],
   'export.downloaded': ["已下载", "Downloaded", "ダウンロード済み"],
+  'export.markUndownloaded': ["标为未下载", "Mark as not downloaded", "未ダウンロードにする"],
+  'export.markUndownloadedFailed': ["无法清除已下载标记。", "Could not clear the downloaded mark.", "ダウンロード済みのマークを解除できませんでした。"],
   'export.bundling': ["正在打包…", "Packaging batches…", "バッチをまとめています…"],
   'export.bundleFailed': ["无法打包所选批次。", "Could not package the selected batches.", "選択したバッチをまとめられませんでした。"],
   'export.kept': ["已保留片段", "Kept clips", "採用クリップ"],

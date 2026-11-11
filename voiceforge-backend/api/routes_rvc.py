@@ -13,7 +13,7 @@ from uuid import UUID
 from zipfile import BadZipFile, ZipFile
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field, StringConstraints, model_validator
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -892,6 +892,20 @@ def download_export(project_id: Identifier, export_id: Identifier, db: DB):
             raise HTTPException(404, "数据集导出不存在。")
         filename = f"rvc-{project_id[:8]}-{export_id[:8]}.zip" if archive.name == "dataset.zip" else archive.name
         return FileResponse(archive, media_type="application/zip", filename=filename)
+
+
+@router.delete("/projects/{project_id}/exports/{export_id}/downloaded", status_code=204)
+def clear_export_download(project_id: Identifier, export_id: Identifier, db: DB):
+    with export_history_lock:
+        get_project(db, project_id)
+        removed = db.get(RemovedHistoryEntry, ("export", project_id, export_id))
+        if removed is not None or find_export_archive(project_id, export_id) is None:
+            raise HTTPException(404, "数据集导出不存在。")
+        db.execute(delete(RvcExportDownload).where(
+            RvcExportDownload.project_id == project_id, RvcExportDownload.export_id == export_id,
+        ))
+        db.commit()
+    return Response(status_code=204)
 
 
 def open_export_directory(folder: Path, *, create: bool = False) -> dict:
