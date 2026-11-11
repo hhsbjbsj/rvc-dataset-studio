@@ -11,15 +11,18 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import select
 
 from config import get_settings
-from database import init_db
+from database import SessionLocal, init_db
 from api.routes_jobs import router as jobs_router
 from api.routes_convert import router as convert_router
 from api.routes_search import router as search_router
 from api.routes_history import router as history_router
 from api.websocket import router as ws_router
 from api.routes_rvc import router as rvc_router
+from processing.rvc_export import migrate_export_folders
+from rvc_projects import RvcProject, project_data
 from workers.rvc_worker import RvcWorker
 
 logging.basicConfig(
@@ -34,6 +37,12 @@ settings = get_settings()
 async def lifespan(app: FastAPI):
     init_db()
     settings.ensure_dirs()
+    with SessionLocal() as db:
+        projects = [project_data(project) for project in db.scalars(select(RvcProject))]
+    try:
+        await asyncio.to_thread(migrate_export_folders, projects)
+    except OSError:
+        logger.warning("Could not organize existing RVC export folders", exc_info=True)
     worker = RvcWorker()
     app.state.rvc_worker = worker
     worker.start()

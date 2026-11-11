@@ -31,5 +31,14 @@ try {
     } finally { $Archive.Dispose() }
     $Hash = (Get-FileHash -LiteralPath $Zip -Algorithm SHA256).Hash.ToLowerInvariant()
     [IO.File]::WriteAllText((Join-Path $Stage 'SHA256SUMS.txt'), "$Hash  $([IO.Path]::GetFileName($Zip))" + [char]10)
+    $Changelog = [IO.File]::ReadAllText((Join-Path $Root 'CHANGELOG.md'))
+    $NotesPattern = '(?ms)^## v' + [regex]::Escape($Version) + '[ \t]*\r?\n(?<notes>.*?)(?=^## |\z)'
+    $Notes = [regex]::Match($Changelog, $NotesPattern).Groups['notes'].Value.Trim()
+    $Manifest = [ordered]@{
+        tag_name = "v$Version"
+        body = $Notes
+        assets = @([ordered]@{name = [IO.Path]::GetFileName($Zip); size = (Get-Item -LiteralPath $Zip).Length; digest = "sha256:$Hash"})
+    }
+    [IO.File]::WriteAllText((Join-Path $Stage 'rvc-update.json'), ($Manifest | ConvertTo-Json -Depth 4))
     Write-Host "Release package ready: $Zip"
 } finally { Pop-Location }

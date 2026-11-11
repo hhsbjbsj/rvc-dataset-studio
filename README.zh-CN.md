@@ -4,6 +4,8 @@
 
 ## Windows 安装与启动
 
+更新连接可在启动器设置中选择「直连 GitHub」或「自定义代理」。代理可填写 HTTPS 前缀（例如 `https://proxy.example/`），或模板（例如 `https://proxy.example/?url={encodedUrl}`）。使用支持 GitHub Release 下载且可信的代理。源码打包脚本同时生成 `rvc-update.json`，发布时随 Windows ZIP 和校验文件上传，供代理模式读取更新说明。
+
 需要 Windows 10/11、Python 3.11 或 3.12（含 `py` 启动器）、Node.js 22.12 或更高版本，以及 PATH 中的 `ffmpeg` 和 `ffprobe`。使用 `py -0p`、`node --version`、`ffmpeg -version` 和 `ffprobe -version` 检查。
 
 到 [GitHub 发布页](https://github.com/hhsbjbsj/rvc-dataset-studio/releases/latest) 下载 Windows x64 ZIP，解压到剩余空间充足的磁盘，从解压目录打开 `RvcLauncher.exe`。首次打开可点击「初始化环境」，然后点击「启动工作台」。如果关掉了浏览器标签页，回到启动器点「打开工作台」即可。启动器会显示实际地址，默认使用 5173 端口，遇到占用时会自动选择空闲端口。顶部可以换图或恢复默认壁纸。「背景适配」支持铺满裁剪、完整显示和拉伸填满，裁剪时可在预览里拖动图片。左侧齿轮可切换启动器语言和自动检查更新。点击「检查更新」可阅读新版说明，再点「下载并重启更新」在应用内安装。更新源固定为本项目的 GitHub 仓库。安装前请保存编辑，等待处理任务结束。关闭启动器时，可确认停止它启动的服务。

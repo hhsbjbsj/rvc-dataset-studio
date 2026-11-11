@@ -14,6 +14,8 @@ internal sealed class LauncherSettings
     };
 
     public bool AutoCheck { get; set; } = true;
+    public bool UseUpdateProxy { get; set; }
+    public string UpdateProxy { get; set; } = "";
     public DateTimeOffset LastCheck { get; set; }
     public string? LatestTag { get; set; }
     public WallpaperPlacement Wallpaper { get; set; } = new();

@@ -112,4 +112,10 @@ def clip_path(clip: RvcClip) -> Path:
 
 
 def export_root(project_id: str) -> Path:
-    return rvc_export_root() / project_id
+    root = rvc_export_root().resolve()
+    legacy = root / project_id
+    if legacy.exists() or not root.is_dir():
+        return legacy
+    suffix = f" [{project_id}]"
+    return next((path for path in root.iterdir()
+                 if path.name.endswith(suffix) and path.is_dir() and path.resolve() == path), legacy)

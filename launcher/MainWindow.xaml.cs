@@ -71,6 +71,12 @@ public partial class MainWindow : Window
         SetAccessibleLabel(DismissSettingsButton, T("close"));
         SettingsTitle.Text = T("settings");
         AutoUpdateInput.Content = T("autoCheck");
+        UpdateSourceLabel.Text = T("updateConnection");
+        AutomationProperties.SetName(UpdateSourceInput, T("updateConnection"));
+        AutomationProperties.SetName(UpdateProxyInput, T("proxyAddress"));
+        DirectSourceItem.Content = T("updateDirect");
+        ProxySourceItem.Content = T("updateCustomProxy");
+        UpdateProxyHelp.Text = T("updateProxyHelp");
         LanguageLabel.Text = T("language");
         AutomationProperties.SetName(LanguageInput, T("language"));
         LogButton.Content = T("logs");
@@ -221,6 +227,9 @@ public partial class MainWindow : Window
     private void ShowSettings()
     {
         AutoUpdateInput.IsChecked = settings.AutoCheck;
+        UpdateProxyInput.Text = settings.UpdateProxy ?? "";
+        UpdateSourceInput.SelectedItem = settings.UseUpdateProxy ? ProxySourceItem : DirectSourceItem;
+        UpdateProxyPanel.Visibility = settings.UseUpdateProxy ? Visibility.Visible : Visibility.Collapsed;
         LanguageInput.SelectedItem = LanguageInput.Items.OfType<ComboBoxItem>()
             .FirstOrDefault(item => Equals(item.Tag, settings.Language)) ?? LanguageInput.Items[0];
         SettingsError.Visibility = Visibility.Collapsed;
@@ -230,12 +239,24 @@ public partial class MainWindow : Window
 
     private async void SaveSettings(object sender, RoutedEventArgs e)
     {
+        bool useProxy = UpdateSourceInput.SelectedItem == ProxySourceItem;
+        string proxy = UpdateProxyInput.Text.Trim();
+        if (useProxy && !GitHubReleases.TryProxyTemplate(proxy, out proxy))
+        {
+            SettingsError.Text = T("invalidUpdateProxy");
+            SettingsError.Visibility = Visibility.Visible;
+            UpdateProxyInput.Focus();
+            return;
+        }
+        bool routeChanged = (useProxy ? proxy : null) != ActiveUpdateProxy;
         var edited = new LauncherSettings
         {
             AutoCheck = AutoUpdateInput.IsChecked == true,
+            UseUpdateProxy = useProxy,
+            UpdateProxy = proxy,
             Language = (LanguageInput.SelectedItem as ComboBoxItem)?.Tag as string ?? "zh",
-            LastCheck = settings.LastCheck,
-            LatestTag = settings.LatestTag,
+            LastCheck = routeChanged ? default : settings.LastCheck,
+            LatestTag = routeChanged ? null : settings.LatestTag,
             Wallpaper = settings.Wallpaper,
         };
         if (!TrySave(edited))
@@ -245,6 +266,7 @@ public partial class MainWindow : Window
             return;
         }
         settings = edited;
+        if (routeChanged) latestRelease = null;
         updateError = null;
         SettingsOverlay.Visibility = Visibility.Collapsed;
         RenderLabels();
@@ -262,6 +284,12 @@ public partial class MainWindow : Window
         {
             return false;
         }
+    }
+
+    private void UpdateSourceChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (UpdateProxyPanel is not null)
+            UpdateProxyPanel.Visibility = UpdateSourceInput.SelectedItem == ProxySourceItem ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void DismissSettings(object sender, RoutedEventArgs e) => SettingsOverlay.Visibility = Visibility.Collapsed;

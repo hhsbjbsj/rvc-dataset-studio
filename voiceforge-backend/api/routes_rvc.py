@@ -23,10 +23,10 @@ from processing.rvc_audio import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS, MediaError,
 from processing.rvc_edit import (
     create_edit, create_edits, delete_buffered_clips, restore_buffer_audio, source_audio_info, source_audio_path, waveform_peaks,
 )
-from processing.rvc_export import export_dataset, list_exports
+from processing.rvc_export import export_dataset, find_export_folder, list_exports
 from processing.rvc_import import stage_conversion
 from rvc_projects import (
-    RvcClip, RvcMergeBuffer, RvcProject, RvcSource, RvcWorkspace, active_clip, clip_data, clip_path, export_root, new_id, project_data,
+    RvcClip, RvcMergeBuffer, RvcProject, RvcSource, RvcWorkspace, active_clip, clip_data, clip_path, new_id, project_data,
     source_data, work_dir,
 )
 from sources.rvc_online import resolve_source_url, search_bilibili_page
@@ -668,7 +668,7 @@ def remove_history(data: HistoryRemoval, db: DB):
         if any(status not in FINISHED_JOBS for _, status in jobs):
             raise HTTPException(409, "运行中的任务不能从历史记录中移除。")
         for project_id, export_id in exports:
-            if not (export_root(project_id) / export_id / "dataset.zip").is_file():
+            if find_export_folder(project_id, export_id) is None:
                 raise HTTPException(404, "部分所选导出已不存在，请刷新历史记录。")
         for project_id, export_id in exports:
             db.merge(RemovedHistoryEntry(kind="export", project_id=project_id, item_id=export_id))
@@ -681,10 +681,10 @@ def remove_history(data: HistoryRemoval, db: DB):
 @router.get("/projects/{project_id}/exports/{export_id}")
 def download_export(project_id: Identifier, export_id: Identifier, db: DB):
     get_project(db, project_id)
-    path = export_root(project_id) / export_id / "dataset.zip"
-    if not path.is_file():
+    folder = find_export_folder(project_id, export_id)
+    if folder is None:
         raise HTTPException(404, "数据集导出不存在。")
-    return FileResponse(path, media_type="application/zip", filename=f"rvc-{project_id[:8]}-{export_id[:8]}.zip")
+    return FileResponse(folder / "dataset.zip", media_type="application/zip", filename=f"rvc-{project_id[:8]}-{export_id[:8]}.zip")
 
 
 def open_export_directory(folder: Path, *, create: bool = False) -> dict:
@@ -707,8 +707,7 @@ def open_exports_folder():
 @router.post("/projects/{project_id}/exports/{export_id}/open-folder")
 def open_batch_folder(project_id: Identifier, export_id: Identifier, db: DB):
     get_project(db, project_id)
-    expected = rvc_export_root().resolve() / project_id / export_id
-    folder = expected.resolve()
-    if folder != expected or not (folder / "dataset.zip").is_file():
+    folder = find_export_folder(project_id, export_id)
+    if folder is None:
         raise HTTPException(404, "数据集导出不存在。")
     return open_export_directory(folder)

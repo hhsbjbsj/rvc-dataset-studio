@@ -20,6 +20,7 @@ from config import rvc_export_root
 from database import Job, SessionLocal
 from main import app
 from processing.rvc_audio import MediaError, write_clip
+from processing.rvc_export import migrate_export_folders
 from rvc_projects import RvcClip, clip_path, export_root, new_id, work_dir
 from sources.rvc_online import normalize_url
 
@@ -272,6 +273,10 @@ def test_windows_mixed_media_review_and_export(client, speech, monkeypatch):
         batches.append(selected_output)
         filenames.add(download.headers["content-disposition"])
     assert len(filenames) == 2
+    assert [batch["batch_number"] for batch in batches] == [1, 2]
+    first_folder = Path(batches[0]["directory"]).parent
+    assert first_folder.name.startswith("第001批 [")
+    assert first_folder.parent.name.startswith("测试角色 [")
     assert client.get(base).json()["review"]["pending"]["count"] == len(clips)
     assert client.post(base + "/export", json={}).status_code == 400
 
@@ -354,6 +359,18 @@ def test_remove_selected_history_preserves_files_and_batch_numbers(client):
     visible_jobs = {job["id"] for job in client.get("/api/history").json()}
     assert removed_job not in visible_jobs and {kept_job, active_job} <= visible_jobs
     assert client.get(f"/api/jobs/{removed_job}").status_code == 200
+
+    # Include the removed batch when renaming legacy directories and preserving their identities.
+    projects = [{"id": project_id, "character": "测试/角色?"}]
+    migrate_export_folders(projects)
+    migrate_export_folders(projects)
+    named_root = export_root(project_id)
+    assert named_root.name == f"测试_角色_ [{project_id}]"
+    assert not oldest.exists()
+    migrated = named_root / f"第001批 [{export_ids[0]}]"
+    assert (migrated / "wavs" / "sample.wav").read_bytes() == b"audio"
+    assert client.get(download_url).content == original_zip
+    assert [batch["batch_number"] for batch in client.get(base + "/exports").json()] == [3, 2]
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg") or not shutil.which("ffprobe"), reason="Requires FFmpeg and FFprobe")
