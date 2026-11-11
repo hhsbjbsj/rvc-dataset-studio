@@ -6,7 +6,7 @@ import { Download, RefreshCw, Trash2, Clock, Layers, Eye, Calendar, Loader2 } fr
 import toast from 'react-hot-toast'
 import { api, getHistory } from '@/lib/api'
 import { BrandMark } from '@/components/BrandMark'
-import { RvcBundleDownload, RvcExportList, RvcExportSearch } from '@/components/RvcExportList'
+import { RvcBundleDownload, RvcExportList, RvcExportSearch, RvcSelectAll } from '@/components/RvcExportList'
 import type { Project } from '@/components/RvcSources'
 import { filterExportBatches, type ExportBatch, type ExportReference } from '@/lib/rvc'
 
@@ -53,10 +53,10 @@ export function HistoryPage() {
     project,
     batches: filterExportBatches(batches, project.character, exportSearch),
   })).filter(({ batches }) => batches.length > 0)
+  const matchingExports = matchingGroups.flatMap(({ project, batches }) => batches
+    .map(batch => ({ project_id: project.id, export_id: batch.export_id })))
   const selection: HistorySelection = {
-    exports: matchingGroups.flatMap(({ project, batches }) => batches
-      .filter(batch => selected.has(exportKey(project.id, batch.export_id)))
-      .map(batch => ({ project_id: project.id, export_id: batch.export_id }))),
+    exports: matchingExports.filter(entry => selected.has(exportKey(entry.project_id, entry.export_id))),
     job_ids: (history ?? []).filter(job => FINISHED.has(job.status) && selected.has(`job:${job.id}`)).map(job => job.id),
   }
   const selectedCount = selection.exports.length + selection.job_ids.length
@@ -133,8 +133,11 @@ export function HistoryPage() {
         {rvcHistory.isSuccess && !rvcHistory.data.length && <p className="text-sm text-lo">{t('history.rvcEmpty')}</p>}
         {!!rvcHistory.data?.length && (
           <div className="flex flex-wrap items-center gap-3">
-            <RvcExportSearch value={exportSearch} onChange={setExportSearch}
-              count={matchingGroups.reduce((count, group) => count + group.batches.length, 0)} />
+            <RvcExportSearch value={exportSearch} onChange={setExportSearch} count={matchingExports.length} />
+            <RvcSelectAll disabled={remove.isPending || matchingExports.length === selection.exports.length}
+              onSelect={() => setSelected(current => new Set([
+                ...current, ...matchingExports.map(entry => exportKey(entry.project_id, entry.export_id)),
+              ]))} />
             <RvcBundleDownload entries={selection.exports} disabled={remove.isPending} />
           </div>
         )}

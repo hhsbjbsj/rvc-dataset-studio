@@ -29,6 +29,15 @@ export function RvcExportSearch({ value, onChange, count }: { value: string; onC
   )
 }
 
+export function RvcSelectAll({ onSelect, disabled }: { onSelect: () => void; disabled: boolean }) {
+  const { t } = useI18n()
+  return (
+    <button type="button" className="btn btn-secondary btn-sm" disabled={disabled} onClick={onSelect}>
+      {t('export.selectAllResults')}
+    </button>
+  )
+}
+
 export function RvcBundleDownload({ entries, disabled }: { entries: ExportReference[]; disabled?: boolean }) {
   const { t, diagnostic } = useI18n()
   const bundle = useMutation({
