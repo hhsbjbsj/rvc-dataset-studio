@@ -13,18 +13,28 @@ type ExportSelection = {
   disabled: boolean
 }
 
-export function RvcExportSearch({ value, onChange, count }: { value: string; onChange: (value: string) => void; count: number }) {
+export function RvcExportFilters({ value, onChange, count, selectedOnly, onSelectedOnlyChange }: {
+  value: string; onChange: (value: string) => void; count: number
+  selectedOnly: boolean; onSelectedOnlyChange: (value: boolean) => void
+}) {
   const { t } = useI18n()
   return (
-    <div>
-      <label className="block max-w-sm text-sm text-mid">
-        {t('export.searchCharacter')}
-        <input type="search" className="input-field mt-1 block w-full" placeholder={t('export.batchNameExample')}
-          value={value} onChange={event => onChange(event.target.value)} />
-      </label>
-      <p role="status" className="mt-1 text-sm text-lo empty:mt-0">
-        {value.trim() && (count ? t('export.searchCount', { count }) : t('export.noSearchResults'))}
-      </p>
+    <div className="flex flex-wrap items-center gap-3">
+      {!selectedOnly && (
+        <div>
+          <label className="block max-w-sm text-sm text-mid">
+            {t('export.searchCharacter')}
+            <input type="search" className="input-field mt-1 block w-full" placeholder={t('export.batchNameExample')}
+              value={value} onChange={event => onChange(event.target.value)} />
+          </label>
+          <p role="status" className="mt-1 text-sm text-lo empty:mt-0">
+            {value.trim() && (count ? t('export.searchCount', { count }) : t('export.noSearchResults'))}
+          </p>
+        </div>
+      )}
+      <button type="button" className={`btn btn-sm ${selectedOnly ? 'btn-primary' : 'btn-secondary'}`}
+        aria-pressed={selectedOnly} onClick={() => onSelectedOnlyChange(!selectedOnly)}>{t('export.selectedOnly')}</button>
+      {selectedOnly && count === 0 && <p role="status" className="text-sm text-lo">{t('export.noSelectedBatches')}</p>}
     </div>
   )
 }

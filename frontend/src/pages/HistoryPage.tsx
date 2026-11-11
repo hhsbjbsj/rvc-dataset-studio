@@ -6,7 +6,7 @@ import { Download, RefreshCw, Trash2, Clock, Layers, Eye, Calendar, Loader2 } fr
 import toast from 'react-hot-toast'
 import { api, getHistory } from '@/lib/api'
 import { BrandMark } from '@/components/BrandMark'
-import { RvcBundleDownload, RvcExportList, RvcExportSearch, RvcResultSelection } from '@/components/RvcExportList'
+import { RvcBundleDownload, RvcExportFilters, RvcExportList, RvcResultSelection } from '@/components/RvcExportList'
 import type { Project } from '@/components/RvcSources'
 import { filterExportBatches, updateSelection, type ExportBatch, type ExportReference } from '@/lib/rvc'
 
@@ -36,6 +36,7 @@ export function HistoryPage() {
   const queryClient = useQueryClient()
   const [selected, setSelected] = useState<Set<string>>(() => new Set())
   const [exportSearch, setExportSearch] = useState('')
+  const [selectedOnly, setSelectedOnly] = useState(false)
   const { data: history, refetch, isLoading, isError, isFetching } = useQuery({
     queryKey: ['history'],
     queryFn: getHistory,
@@ -49,14 +50,15 @@ export function HistoryPage() {
     mutationFn: () => api.post('/api/rvc/exports/open-folder'),
     onError: () => toast.error(t('export.openFolderFailed')),
   })
-  const matchingGroups = (rvcHistory.data ?? []).map(({ project, batches }) => ({
+  const visibleGroups = (rvcHistory.data ?? []).map(({ project, batches }) => ({
     project,
-    batches: filterExportBatches(batches, project.character, exportSearch),
+    batches: filterExportBatches(batches, project.character, selectedOnly ? '' : exportSearch,
+      selectedOnly ? exportId => selected.has(exportKey(project.id, exportId)) : undefined),
   })).filter(({ batches }) => batches.length > 0)
-  const matchingExports = matchingGroups.flatMap(({ project, batches }) => batches
+  const visibleExports = visibleGroups.flatMap(({ project, batches }) => batches
     .map(batch => ({ project_id: project.id, export_id: batch.export_id })))
   const selection: HistorySelection = {
-    exports: matchingExports.filter(entry => selected.has(exportKey(entry.project_id, entry.export_id))),
+    exports: visibleExports.filter(entry => selected.has(exportKey(entry.project_id, entry.export_id))),
     job_ids: (history ?? []).filter(job => FINISHED.has(job.status) && selected.has(`job:${job.id}`)).map(job => job.id),
   }
   const selectedCount = selection.exports.length + selection.job_ids.length
@@ -128,14 +130,17 @@ export function HistoryPage() {
         {rvcHistory.isSuccess && !rvcHistory.data.length && <p className="text-sm text-lo">{t('history.rvcEmpty')}</p>}
         {!!rvcHistory.data?.length && (
           <div className="flex flex-wrap items-center gap-3">
-            <RvcExportSearch value={exportSearch} onChange={setExportSearch} count={matchingExports.length} />
-            <RvcResultSelection count={matchingExports.length} selectedCount={selection.exports.length} disabled={remove.isPending}
-              onChange={checked => setSelected(current => updateSelection(current,
-                matchingExports.map(entry => exportKey(entry.project_id, entry.export_id)), checked))} />
+            <RvcExportFilters value={exportSearch} onChange={setExportSearch} count={visibleExports.length}
+              selectedOnly={selectedOnly} onSelectedOnlyChange={setSelectedOnly} />
+            {!selectedOnly && (
+              <RvcResultSelection count={visibleExports.length} selectedCount={selection.exports.length} disabled={remove.isPending}
+                onChange={checked => setSelected(current => updateSelection(current,
+                  visibleExports.map(entry => exportKey(entry.project_id, entry.export_id)), checked))} />
+            )}
             <RvcBundleDownload entries={selection.exports} disabled={remove.isPending} />
           </div>
         )}
-        {matchingGroups.map(({ project, batches }) => (
+        {visibleGroups.map(({ project, batches }) => (
           <article className="card space-y-3 !p-5" key={project.id}>
             <h3 className="break-all text-base font-medium text-hi">{project.character}</h3>
             <p className="break-all text-xs text-lo">{project.series} · {project.language}</p>

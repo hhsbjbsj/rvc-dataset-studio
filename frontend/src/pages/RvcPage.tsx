@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { isAxiosError } from 'axios'
 import { RvcAudioRangeEditor, RvcManualEditor, type AudioRange } from '@/components/RvcManualEditor'
-import { RvcBundleDownload, RvcExportList, RvcExportSearch, RvcResultSelection } from '@/components/RvcExportList'
+import { RvcBundleDownload, RvcExportFilters, RvcExportList, RvcResultSelection } from '@/components/RvcExportList'
 import { RvcSources, type Project, type RunAction } from '@/components/RvcSources'
 import { api } from '@/lib/api'
 import { API_URL } from '@/lib/config'
@@ -65,6 +65,7 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
   const [sampleRate, setSampleRate] = useState(40000)
   const [batchName, setBatchName] = useState('')
   const [exportSearch, setExportSearch] = useState('')
+  const [selectedOnly, setSelectedOnly] = useState(false)
   const [selectedExports, setSelectedExports] = useState<Set<string>>(() => new Set())
   const [manualClip, setManualClip] = useState<ManualClip>()
   const [trimTarget, setTrimTarget] = useState<Clip>()
@@ -95,8 +96,9 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
     queryFn: async () => (await api.get<ExportBatch[]>(base + '/exports')).data,
   })
   const batches = exportHistory.data ?? []
-  const matchingBatches = filterExportBatches(batches, project.character, exportSearch)
-  const selectedBatches = matchingBatches.filter(batch => selectedExports.has(batch.export_id))
+  const visibleBatches = filterExportBatches(batches, project.character, selectedOnly ? '' : exportSearch,
+    selectedOnly ? exportId => selectedExports.has(exportId) : undefined)
+  const selectedBatches = visibleBatches.filter(batch => selectedExports.has(batch.export_id))
     .map(batch => ({ project_id: id, export_id: batch.export_id }))
   const bufferKey = ['rvc-merge-buffer', id]
   const buffer = useQuery({
@@ -431,14 +433,17 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
             {exportHistory.isSuccess && !batches.length && <p className="text-sm text-lo">{t('rvc.noExports')}</p>}
             {!!batches.length && (
               <div className="flex flex-wrap items-center gap-3">
-                <RvcExportSearch value={exportSearch} onChange={setExportSearch} count={matchingBatches.length} />
-                <RvcResultSelection count={matchingBatches.length} selectedCount={selectedBatches.length}
-                  onChange={checked => setSelectedExports(current => updateSelection(current,
-                    matchingBatches.map(batch => batch.export_id), checked))} />
+                <RvcExportFilters value={exportSearch} onChange={setExportSearch} count={visibleBatches.length}
+                  selectedOnly={selectedOnly} onSelectedOnlyChange={setSelectedOnly} />
+                {!selectedOnly && (
+                  <RvcResultSelection count={visibleBatches.length} selectedCount={selectedBatches.length}
+                    onChange={checked => setSelectedExports(current => updateSelection(current,
+                      visibleBatches.map(batch => batch.export_id), checked))} />
+                )}
                 <RvcBundleDownload entries={selectedBatches} />
               </div>
             )}
-            {!!matchingBatches.length && <RvcExportList projectId={id} batches={matchingBatches} selection={{
+            {!!visibleBatches.length && <RvcExportList projectId={id} batches={visibleBatches} selection={{
               isSelected: exportId => selectedExports.has(exportId),
               toggle: (exportId, checked) => setSelectedExports(current => updateSelection(current, [exportId], checked)),
               disabled: false,

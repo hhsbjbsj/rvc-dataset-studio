@@ -73,6 +73,8 @@ export const messages = {
   'export.noSearchResults': ["找不到符合的导出批次。", "No matching export batches.", "一致する書き出しバッチがありません。"],
   'export.selectAllResults': ["全选当前结果", "Select all results", "表示中の結果をすべて選択"],
   'export.deselectResults': ["取消全选", "Deselect results", "表示中の選択を解除"],
+  'export.selectedOnly': ["只看已选", "Show selected only", "選択済みのみ表示"],
+  'export.noSelectedBatches': ["还没有勾选导出批次。", "No export batches selected.", "書き出しバッチが選択されていません。"],
   'export.bundleSelected': ["打包所选批次（{count}）", "Download selected batches ({count})", "選択したバッチをまとめて保存（{count}）"],
   'export.bundling': ["正在打包…", "Packaging batches…", "バッチをまとめています…"],
   'export.bundleFailed': ["无法打包所选批次。", "Could not package the selected batches.", "選択したバッチをまとめられませんでした。"],
