@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, select, true
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, and_, select, true
 from sqlalchemy.orm import Mapped, mapped_column
 
 from config import get_settings, rvc_export_root
@@ -108,7 +108,7 @@ class RvcMergeBuffer(Base):
 
 
 def active_clip():
-    return RvcClip.id.not_in(select(RvcMergeBuffer.clip_id))
+    return and_(RvcClip.review != "excluded", RvcClip.id.not_in(select(RvcMergeBuffer.clip_id)))
 
 
 def project_data(project: RvcProject) -> dict:

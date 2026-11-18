@@ -244,7 +244,7 @@ def project_details(project_id: Identifier, db: DB):
     sources = db.scalars(select(RvcSource).where(RvcSource.project_id == project_id).order_by(RvcSource.created_at)).all()
     stats = db.execute(
         select(RvcClip.review, func.count(), func.sum(RvcClip.duration))
-        .where(RvcClip.project_id == project_id, active_clip()).group_by(RvcClip.review)
+        .where(RvcClip.project_id == project_id, RvcClip.id.not_in(select(RvcMergeBuffer.clip_id))).group_by(RvcClip.review)
     ).all()
     return {
         **project_data(project), "sources": [source_data(source) for source in sources],
@@ -617,13 +617,40 @@ def clips(project_id: Identifier, db: DB, page: Annotated[int, Query(ge=1)] = 1)
     return {"clips": [clip_data(clip, source) for clip, source in rows], "total": total}
 
 
+@router.get("/projects/{project_id}/excluded-buffer")
+def excluded_buffer(project_id: Identifier, db: DB):
+    get_project(db, project_id)
+    rows = db.execute(
+        select(RvcClip, RvcSource).join(RvcSource)
+        .where(RvcClip.project_id == project_id, RvcClip.review == "excluded",
+               RvcClip.id.not_in(select(RvcMergeBuffer.clip_id)))
+        .order_by(RvcSource.created_at, RvcClip.start, RvcClip.id)
+    )
+    return {"clips": [clip_data(clip, source) for clip, source in rows]}
+
+
+@router.delete("/projects/{project_id}/excluded-buffer")
+def delete_excluded_clips(project_id: Identifier, data: ClearBufferInput, db: DB):
+    with clip_file_lock:
+        get_project(db, project_id)
+        clips = db.scalars(
+            select(RvcClip).where(RvcClip.project_id == project_id, RvcClip.id.in_(set(data.clip_ids)),
+                                  RvcClip.review == "excluded", RvcClip.id.not_in(select(RvcMergeBuffer.clip_id)))
+        ).all()
+        try:
+            delete_buffered_clips(db, [(clip, None) for clip in clips])
+        except MediaError as exc:
+            raise HTTPException(409, str(exc)) from exc
+    return {"deleted": len(clips)}
+
+
 @router.get("/projects/{project_id}/clips/{clip_id}/audio")
 def clip_audio(project_id: Identifier, clip_id: Identifier, db: DB):
     clip = db.get(RvcClip, clip_id)
     if clip is None or clip.project_id != project_id:
         raise HTTPException(404, "片段文件不存在。")
     path = clip_path(clip)
-    if not path.is_file() and db.get(RvcMergeBuffer, clip_id) is not None:
+    if not path.is_file() and (clip.review == "excluded" or db.get(RvcMergeBuffer, clip_id) is not None):
         path = path.with_suffix(".deleting")
     if not path.is_file():
         raise HTTPException(404, "片段文件不存在。")
@@ -643,14 +670,18 @@ def clip_waveform(project_id: Identifier, clip_id: Identifier, db: DB):
 
 @router.patch("/projects/{project_id}/clips/review")
 def review_clips(project_id: Identifier, data: ReviewInput, db: DB):
-    get_project(db, project_id)
-    filters = [RvcClip.project_id == project_id, active_clip()]
-    if data.ids is None:
-        filters.append(RvcClip.review == "pending")
-    else:
-        filters.append(RvcClip.id.in_(data.ids))
-    result = db.execute(update(RvcClip).where(*filters).values(review=data.review))
-    db.commit()
+    with clip_file_lock:
+        get_project(db, project_id)
+        filters = [RvcClip.project_id == project_id, RvcClip.id.not_in(select(RvcMergeBuffer.clip_id))]
+        if data.ids is None:
+            filters.append(RvcClip.review == "pending")
+        else:
+            filters.append(RvcClip.id.in_(data.ids))
+        if data.review != "excluded":
+            for clip in db.scalars(select(RvcClip).where(*filters, RvcClip.review == "excluded")):
+                restore_buffer_audio(clip)
+        result = db.execute(update(RvcClip).where(*filters).values(review=data.review))
+        db.commit()
     return {"updated": result.rowcount}
 
 

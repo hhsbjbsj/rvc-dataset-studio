@@ -183,9 +183,12 @@ def save_edits(
                 data["quality"]["edit"] = method
                 clip = RvcClip(id=new_id(), project_id=project_id, source_id=source.id, generation=generation, **data)
                 db.add(clip)
-            elif (buffered := db.get(RvcMergeBuffer, clip.id)) is not None:
+            else:
                 restore_buffer_audio(clip)
-                db.delete(buffered)
+                if (buffered := db.get(RvcMergeBuffer, clip.id)) is not None:
+                    db.delete(buffered)
+            if clip.review == "excluded":
+                clip.review = "pending"
             clips.append(clip)
 
         retired = [] if replace is None else [item for item in replace if item.id != clips[0].id]
@@ -217,7 +220,7 @@ def restore_buffer_audio(clip: RvcClip) -> None:
         os.replace(staged, path)
 
 
-def delete_buffered_clips(db: Session, rows: Sequence[tuple[RvcClip, RvcMergeBuffer]]) -> None:
+def delete_buffered_clips(db: Session, rows: Sequence[tuple[RvcClip, RvcMergeBuffer | None]]) -> None:
     if not rows:
         return
     paths = [clip_path(clip) for clip, _ in rows]
@@ -232,7 +235,8 @@ def delete_buffered_clips(db: Session, rows: Sequence[tuple[RvcClip, RvcMergeBuf
                     raise MediaError("暂时无法移除音频文件，请暂停试听后重试。") from exc
                 moved.append((path, staged))
         for _, entry in rows:
-            db.delete(entry)
+            if entry is not None:
+                db.delete(entry)
         db.flush()
         for clip, _ in rows:
             db.delete(clip)

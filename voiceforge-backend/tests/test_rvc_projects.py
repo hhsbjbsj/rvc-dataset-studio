@@ -23,7 +23,7 @@ from database import Job, SessionLocal
 from main import app
 from processing.rvc_audio import MediaError, write_clip
 from processing.rvc_export import export_bundle_path, migrate_export_folders
-from rvc_projects import RvcClip, clip_path, export_root, new_id, work_dir
+from rvc_projects import RvcClip, RvcMergeBuffer, RvcSource, clip_path, export_root, new_id, work_dir
 from sources.rvc_online import normalize_url
 
 VIDEO = "https://www.bilibili.com/video/BV1n44y1Q7sc"
@@ -60,6 +60,111 @@ def test_workspace_remembers_explicitly_opened_project(client):
     assert client.put(workspace, json={"project_id": "0" * 32}).status_code == 404
     assert client.get(workspace).json() == {"last_project_id": older}
     assert client.put(workspace, json={"project_id": newer}).json() == {"last_project_id": newer}
+
+
+def test_excluded_buffer_preserves_audio_and_isolates_merge_entries(client, monkeypatch):
+    base = new_project(client)
+    project_id = base.rsplit("/", 1)[-1]
+    buffer_url = base + "/excluded-buffer"
+    ids = []
+    paths = []
+    with SessionLocal() as db:
+        for index, kind in enumerate(("local_video", "local_audio", "bilibili", "youtube")):
+            source = RvcSource(id=new_id(), project_id=project_id, kind=kind, source_key=new_id(),
+                               origin=f"fixture-{index}", title=f"素材 {index}", status="done")
+            db.add(source)
+            clip_id = new_id()
+            clip = RvcClip(id=clip_id, project_id=project_id, source_id=source.id, filename="000001.wav",
+                           generation=new_id(), digest=clip_id * 2, start=0, end=0.1, duration=0.1,
+                           review="excluded" if index == 0 else "pending", quality={})
+            db.add(clip)
+            path = clip_path(clip)
+            path.parent.mkdir(parents=True)
+            with wave.open(str(path), "wb") as audio:
+                audio.setparams((1, 2, 48000, 0, "NONE", "not compressed"))
+                audio.writeframes(b"\x01\x00" * 4800)
+            ids.append(clip_id)
+            paths.append(path)
+        db.add(RvcMergeBuffer(clip_id=ids[-1]))
+        db.commit()
+
+    originals = [path.read_bytes() for path in paths]
+    assert client.get(base + "/clips").json()["total"] == 2
+    assert [clip["id"] for clip in client.get(buffer_url).json()["clips"]] == [ids[0]]
+    assert client.get(base).json()["review"]["excluded"]["count"] == 1
+    for clip_id in ids[:3]:
+        assert client.patch(base + "/clips/review", json={"ids": [clip_id], "review": "excluded"}).json() == {"updated": 1}
+    assert client.get(base + "/clips").json() == {"clips": [], "total": 0}
+    assert {clip["id"] for clip in client.get(buffer_url).json()["clips"]} == set(ids[:3])
+    assert [clip["id"] for clip in client.get(base + "/merge-buffer").json()["clips"]] == [ids[3]]
+    assert [path.read_bytes() for path in paths] == originals
+    assert client.get(base + "/clips/" + ids[0] + "/audio").content == originals[0]
+    assert client.post(base + "/export", json={"clip_ids": [ids[0]]}).status_code == 400
+    assert client.post(base + "/clips/merge", json={"clip_ids": ids[:2]}).status_code == 400
+    assert client.post(base + "/clips/" + ids[0] + "/trim", json={"start": 0, "end": 0.05}).status_code == 404
+
+    # A new client loads the persisted buffer, including a clip excluded before this change.
+    with TestClient(app, base_url="http://127.0.0.1") as reopened:
+        assert len(reopened.get(buffer_url).json()["clips"]) == 3
+    staged_path = paths[1].with_suffix(".deleting")
+    paths[1].replace(staged_path)
+    assert client.get(base + "/clips/" + ids[1] + "/audio").content == originals[1]
+    assert client.patch(base + "/clips/review", json={"ids": [ids[1]], "review": "pending"}).json() == {"updated": 1}
+    assert paths[1].read_bytes() == originals[1] and not staged_path.exists()
+    assert [clip["id"] for clip in client.get(base + "/clips").json()["clips"]] == [ids[1]]
+
+    other_base = new_project(client)
+    assert client.get(other_base + "/excluded-buffer").json() == {"clips": []}
+    assert client.request("DELETE", other_base + "/excluded-buffer", json={"clip_ids": ids}).json() == {"deleted": 0}
+    assert client.request("DELETE", base + "/merge-buffer", json={"clip_ids": ids[:3]}).json() == {"deleted": 0}
+    assert client.patch(base + "/clips/review", json={"ids": [ids[3]], "review": "excluded"}).json() == {"updated": 0}
+
+    replace_file = os.replace
+    staged = []
+
+    def fail_second_stage(source, destination):
+        if Path(destination).suffix == ".deleting":
+            staged.append(source)
+            if len(staged) == 2:
+                raise PermissionError("模拟文件被占用")
+        return replace_file(source, destination)
+
+    with monkeypatch.context() as patch:
+        patch.setattr("processing.rvc_edit.os.replace", fail_second_stage)
+        assert client.request("DELETE", buffer_url, json={"clip_ids": ids}).status_code == 409
+    assert {clip["id"] for clip in client.get(buffer_url).json()["clips"]} == {ids[0], ids[2]}
+    assert [path.read_bytes() for path in paths] == originals
+    assert all(not path.with_suffix(".deleting").exists() for path in paths)
+
+    # Only excluded clips in the confirmed snapshot can be deleted.
+    assert client.request("DELETE", buffer_url, json={"clip_ids": [ids[0], ids[1], ids[3]]}).json() == {"deleted": 1}
+    assert not paths[0].exists() and all(path.is_file() for path in paths[1:])
+    assert client.get(base + "/clips/" + ids[0] + "/audio").status_code == 404
+    assert client.request("DELETE", buffer_url, json={"clip_ids": ids}).json() == {"deleted": 1}
+    assert client.request("DELETE", buffer_url, json={"clip_ids": ids}).json() == {"deleted": 0}
+    assert client.get(buffer_url).json() == {"clips": []}
+    assert paths[1].read_bytes() == originals[1] and paths[3].read_bytes() == originals[3]
+
+
+def test_excluded_clips_are_removed_before_pagination(client):
+    base = new_project(client)
+    project_id = base.rsplit("/", 1)[-1]
+    ids = [new_id() for _ in range(102)]
+    with SessionLocal() as db:
+        source = RvcSource(id=new_id(), project_id=project_id, kind="local_audio", source_key=new_id(),
+                           origin="pagination.wav", title="多段音频", status="done")
+        db.add(source)
+        db.add_all(RvcClip(id=clip_id, project_id=project_id, source_id=source.id, generation=new_id(),
+                           filename="000001.wav", digest=clip_id * 2, start=index, end=index + 1,
+                           duration=1, quality={}, review="pending") for index, clip_id in enumerate(ids))
+        db.commit()
+    assert len(client.get(base + "/clips").json()["clips"]) == 100
+    assert len(client.get(base + "/clips?page=2").json()["clips"]) == 2
+    assert client.patch(base + "/clips/review", json={"ids": ids[:100], "review": "excluded"}).json() == {"updated": 100}
+    visible = client.get(base + "/clips").json()
+    assert visible["total"] == 2 and [clip["id"] for clip in visible["clips"]] == ids[100:]
+    assert client.get(base + "/clips?page=2").json() == {"clips": [], "total": 2}
+    assert len(client.get(base + "/excluded-buffer").json()["clips"]) == 100
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows File Explorer integration")
@@ -293,6 +398,10 @@ def test_windows_mixed_media_review_and_export(client, speech, monkeypatch):
         "ids": [clip["id"] for clip in retained], "review": "kept",
     }).json()["updated"] == len(retained)
     assert client.patch(base + "/clips/review", json={"ids": [clips[-1]["id"]], "review": "excluded"}).status_code == 200
+    visible = client.get(base + "/clips").json()
+    assert visible["total"] == len(retained)
+    assert all(clip["id"] != clips[-1]["id"] for clip in visible["clips"])
+    assert [clip["id"] for clip in client.get(base + "/excluded-buffer").json()["clips"]] == [clips[-1]["id"]]
 
     output = post(client, base + "/export", {"sample_rate": 40000})
     assert output["scope"] == "kept"
@@ -979,6 +1088,11 @@ def test_manual_edit_uses_the_source_timeline(client, speech, monkeypatch):
     assert clip_audio(merged).status_code == clip_audio(third).status_code == 404
     assert clip_audio(reused).status_code == 200
     assert client.request("DELETE", buffer_url, json=confirmed).json() == {"deleted": 0}
+
+    assert client.patch(base + "/clips/review", json={"ids": [trimmed["id"]], "review": "excluded"}).json() == {"updated": 1}
+    restored_range = post(client, source_base + "/clips", {"start": 0.25, "end": 0.65})
+    assert restored_range["id"] == trimmed["id"] and restored_range["review"] == "pending"
+    assert client.get(base + "/excluded-buffer").json() == {"clips": []}
 
 
 def test_save_ranges_as_independent_wavs(client, speech, monkeypatch):

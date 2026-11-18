@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { isAxiosError } from 'axios'
 import { RvcAudioRangeEditor, RvcManualEditor, type AudioRange } from '@/components/RvcManualEditor'
+import { RvcExcludedBuffer } from '@/components/RvcExcludedBuffer'
 import { RvcBundleDownload, RvcExportFilters, RvcExportList, RvcExportSelectionError, RvcMarkUndownloaded, RvcResultSelection } from '@/components/RvcExportList'
 import { RvcSources, type Project, type RunAction } from '@/components/RvcSources'
 import { api } from '@/lib/api'
@@ -146,8 +147,14 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
     run('rvc.saveReview', async () => {
       await api.patch(base + '/clips/review', { ids, review: state })
       setSelected(previous => previous.filter(clipId => !ids.includes(clipId)))
+      if (state === 'excluded') {
+        setManualClip(previous => previous && ids.includes(previous.id) ? undefined : previous)
+        setTrimTarget(previous => previous && ids.includes(previous.id) ? undefined : previous)
+        setTrimResults(previous => previous.filter(clip => !ids.includes(clip.id)))
+        void queryClient.invalidateQueries({ queryKey: ['rvc-excluded-buffer', id] })
+      }
       refresh()
-      await clipPage.refetch()
+      await queryClient.invalidateQueries({ queryKey: ['rvc-clips', id] })
     })
   }
 
@@ -159,6 +166,7 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
       setTrimTarget(data)
       setTrimResults(previous => previous.filter(clip => !selected.includes(clip.id) || clip.id === data.id))
       await queryClient.invalidateQueries({ queryKey: bufferKey })
+      await queryClient.invalidateQueries({ queryKey: ['rvc-excluded-buffer', id] })
       refresh()
       await queryClient.invalidateQueries({ queryKey: ['rvc-clips', id] })
     })
@@ -171,6 +179,7 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
       setTrimResults(previous => [...previous, ...data.clips.filter(clip => !previous.some(item => item.id === clip.id))])
       onSaved()
       await queryClient.invalidateQueries({ queryKey: bufferKey })
+      await queryClient.invalidateQueries({ queryKey: ['rvc-excluded-buffer', id] })
       refresh()
       await queryClient.invalidateQueries({ queryKey: ['rvc-clips', id] })
     })
@@ -181,6 +190,7 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
       const path = base + '/merge-buffer/' + clipId
       if (restore) {
         await api.post(path + '/restore')
+        void queryClient.invalidateQueries({ queryKey: ['rvc-excluded-buffer', id] })
         refresh()
         await queryClient.invalidateQueries({ queryKey: ['rvc-clips', id] })
       } else {
@@ -390,8 +400,9 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
             </div>
           )}
         </details>
+        <RvcExcludedBuffer projectId={id} count={details.data?.review.excluded?.count ?? 0} busy={busy} run={run} />
         {clipPage.isError && <p role="alert" className="text-sm text-lo">{diagnostic(message(clipPage.error))}</p>}
-        {!clipPage.data?.clips.length && <p className="text-sm text-lo">{t('rvc.noClips')}</p>}
+        {!clipPage.data?.clips.length && <p className="text-sm text-lo">{t(details.data?.review.excluded?.count ? 'rvc.noActiveClips' : 'rvc.noClips')}</p>}
         {!!(clipPage.data?.clips.length || selected.length) && (
           <div className="flex flex-wrap items-center gap-2">
             <button className="btn btn-secondary btn-sm" disabled={busy || !clipPage.data?.clips.length}
