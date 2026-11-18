@@ -75,7 +75,15 @@ internal static class GitHubReleases
             }
             catch (Exception exception) when (exception is HttpRequestException or JsonException or InvalidDataException) { }
         }
-        var release = await ReadReleaseAsync(LatestApi, proxyTemplate, timeout.Token);
+        ReleaseInfo? release;
+        try
+        {
+            release = await ReadReleaseAsync(LatestApi, proxyTemplate, timeout.Token);
+        }
+        catch (HttpRequestException) when (proxyTemplate is null)
+        {
+            return await ReadReleaseAsync(LatestManifest, null, timeout.Token);
+        }
         if (proxyTemplate is not null && release is null) throw new InvalidDataException("No release returned by the update proxy.");
         return release;
     }
