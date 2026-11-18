@@ -685,6 +685,17 @@ def review_clips(project_id: Identifier, data: ReviewInput, db: DB):
     return {"updated": result.rowcount}
 
 
+@router.post("/projects/{project_id}/clips/exclude-all")
+def exclude_all_clips(project_id: Identifier, db: DB):
+    with clip_file_lock:
+        get_project(db, project_id)
+        result = db.execute(
+            update(RvcClip).where(RvcClip.project_id == project_id, active_clip()).values(review="excluded")
+        )
+        db.commit()
+    return {"updated": result.rowcount}
+
+
 @router.post("/projects/{project_id}/export")
 def export_project(project_id: Identifier, data: ExportInput, db: DB):
     with clip_file_lock:

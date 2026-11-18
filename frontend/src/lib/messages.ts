@@ -229,6 +229,7 @@ export const messages = {
   'rvc.duplicates': ["去重 {count} 段", "{count} duplicate(s) skipped", "重複 {count} 件をスキップ"],
   'rvc.exclude': ["剔除", "Exclude", "除外"],
   'rvc.excludeSelected': ["剔除所选", "Exclude selected", "選択項目を除外"],
+  'rvc.excludeAll': ["全部移入剔除缓冲区", "Move all clips to excluded buffer", "すべてのクリップを除外"],
   'rvc.excludedBufferCount': ["剔除缓冲区（{count} 段）", "Excluded clips ({count})", "除外したクリップ（{count} 件）"],
   'rvc.excludedBufferHelp': ["剔除的片段保存在这里，可以试听、恢复到审核列表，或确认永久删除。", "Preview excluded clips here, restore them to the review list, or confirm permanent deletion.", "除外したクリップを試聴し、確認一覧に戻すか、完全に削除できます。"],
   'rvc.excludedBufferEmpty': ["剔除缓冲区为空。", "There are no excluded clips.", "除外したクリップはありません。"],

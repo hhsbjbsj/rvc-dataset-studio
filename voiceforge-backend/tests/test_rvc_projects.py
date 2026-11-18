@@ -167,6 +167,38 @@ def test_excluded_clips_are_removed_before_pagination(client):
     assert len(client.get(base + "/excluded-buffer").json()["clips"]) == 100
 
 
+def test_exclude_all_moves_all_pages_and_kept_clips_to_buffer(client):
+    base = new_project(client)
+    other_base = new_project(client)
+    project_id = base.rsplit("/", 1)[-1]
+    ids = [new_id() for _ in range(1003)]
+    with SessionLocal() as db:
+        source = RvcSource(id=new_id(), project_id=project_id, kind="local_audio", source_key=new_id(),
+                           origin="all-clips.wav", title="全部清空测试", status="done")
+        db.add(source)
+        db.add_all(RvcClip(id=clip_id, project_id=project_id, source_id=source.id, generation=new_id(),
+                           filename="000001.wav", digest=clip_id * 2, start=index, end=index + 1,
+                           duration=1, quality={}, review="kept" if index % 2 else "pending")
+                   for index, clip_id in enumerate(ids))
+        db.flush()
+        db.get(RvcClip, ids[0]).review = "excluded"
+        db.add(RvcMergeBuffer(clip_id=ids[-1]))
+        db.commit()
+    assert client.get(base + "/clips").json()["total"] == 1001
+    assert client.post(other_base + "/clips/exclude-all").json() == {"updated": 0}
+    url = base + "/clips/exclude-all"
+    assert client.post(url, headers={"Origin": "https://example.com"}).status_code == 403
+    assert client.post("/api/rvc/projects/" + "0" * 32 + "/clips/exclude-all").status_code == 404
+    assert client.post(url).json() == {"updated": 1001}
+    assert client.get(base + "/clips").json() == {"clips": [], "total": 0}
+    assert client.get(base + "/clips?page=2").json() == {"clips": [], "total": 0}
+    assert {clip["id"] for clip in client.get(base + "/excluded-buffer").json()["clips"]} == set(ids[:-1])
+    assert [clip["id"] for clip in client.get(base + "/merge-buffer").json()["clips"]] == [ids[-1]]
+    assert client.post(url).json() == {"updated": 0}
+    assert client.patch(base + "/clips/review", json={"ids": [ids[1]], "review": "pending"}).json() == {"updated": 1}
+    assert [clip["id"] for clip in client.get(base + "/clips").json()["clips"]] == [ids[1]]
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows File Explorer integration")
 def test_open_export_folder_uses_the_configured_location(client, monkeypatch):
     opened = []
@@ -443,6 +475,12 @@ def test_windows_mixed_media_review_and_export(client, speech, monkeypatch):
         assert {"metadata.json", "sources.json", "quality_report.json"} <= set(bundle.namelist())
         with wave.open(io.BytesIO(bundle.read("wavs/000001.wav"))) as first:
             assert (first.getnchannels(), first.getsampwidth(), first.getframerate()) == (1, 2, 40000)
+
+    assert client.post(base + "/clips/exclude-all").json() == {"updated": len(retained)}
+    assert client.get(base + "/clips").json() == {"clips": [], "total": 0}
+    assert client.get(output["download_url"]).content == archive.content
+    assert client.get(base + "/exports").json() == expected_batches[:2]
+    assert all(hashlib.sha256(file.read_bytes()).hexdigest() == digest for file, digest in hashes.items())
 
 
 def test_remove_selected_history_preserves_files_and_batch_numbers(client):

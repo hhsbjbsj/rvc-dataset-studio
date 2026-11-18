@@ -158,6 +158,22 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
     })
   }
 
+  function excludeAll() {
+    run('rvc.excludeAll', async () => {
+      await api.post(base + '/clips/exclude-all')
+      setSelected([])
+      setManualClip(undefined)
+      setTrimTarget(undefined)
+      setTrimResults([])
+      setPage(1)
+      refresh()
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['rvc-clips', id] }),
+        queryClient.invalidateQueries({ queryKey: ['rvc-excluded-buffer', id] }),
+      ])
+    })
+  }
+
   function mergeSelected() {
     run('rvc.merge', async () => {
       const { data } = await api.post<ManualClip>(base + '/clips/merge', { clip_ids: selected })
@@ -413,6 +429,7 @@ function ProjectWorkspace({ project, busy, run }: { project: Project; busy: bool
             <button className="btn btn-secondary btn-sm" disabled={busy || !selected.length} onClick={() => setSelected([])}>{t('rvc.clearSelection')}</button>
             <button className="btn btn-secondary btn-sm" disabled={busy || !hasSelection} onClick={() => review(selected, 'kept')}>{t('rvc.keepSelected')}</button>
             <button className="btn btn-danger btn-sm" disabled={busy || !hasSelection} onClick={() => review(selected, 'excluded')}>{t('rvc.excludeSelected')}</button>
+            <button className="btn btn-danger btn-sm" disabled={busy || !clipPage.data?.total} onClick={excludeAll}>{t('rvc.excludeAll')}</button>
             <button className="btn btn-secondary btn-sm" disabled={busy || !hasSelection || selected.length < 2}
               onClick={mergeSelected}>{t('rvc.merge')}</button>
             <span className="text-sm text-mid" aria-live="polite">{t('rvc.selected', { count: selected.length })}</span>
